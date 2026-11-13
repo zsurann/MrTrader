@@ -17,7 +17,10 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - Hosting: Google Cloud e2-micro (free tier), systemd service, desk auto-resumes after reboot. Phone access via Tailscale serve (private, no public port). User choice.
 
+- Deployed on GCP, running overnight from 2026-11-13 (paper). Scout widened to Gecko busiest/trending pools.
+
 ## Tickets (frontier)
+- [ ] **Review first overnight results** `wayfinder:grilling` — kill-reason mix, trades, P&L; are filters too strict? Blocks the tickets below.
 - [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
 - [ ] **Smart wallet list** `wayfinder:grilling` — which wallets count as smart; how to source/refresh `smart_wallets.txt`.
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.
