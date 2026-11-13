@@ -8,7 +8,7 @@ import json, os, re, sys, time, urllib.request
 
 CFG = dict(
     age_min_h=0.5, age_max_h=72, mcap_min=300_000, mcap_max=20_000_000,
-    liq_min=40_000, vol1h_min=50_000, top10_max=25, dev_max=3, bundle_max=10,
+    liq_min=40_000, vol1h_min=25_000, top10_max=25, dev_max=3, bundle_max=10,
     pump1h_max=80, lp_locked_min=90, score_min=70,
     size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06,
     slippage=0.01, start_equity=10_000, scan_every_s=120, tick_s=10, kill_cache_s=1800,

@@ -21,10 +21,10 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - Smart wallets: user copies from GMGN Smart Money, pastes in dashboard; desk checks on-chain holdings via Solana RPC (getTokenAccountsByOwner). User choice.
 
-- First ~6h (2026-11-13): 1 trade, WANTED score 71.9, stopped -8.15% after 4 min (stop slipped past -6%). Top kills: 1h vol 109, liq 82 (mostly dead $0 pairs), score 68, top10 48, rug history 26. Fixes: dead pairs skip RugCheck; price check every 10s.
+- First ~6h (2026-11-13): 1 trade, WANTED score 71.9, stopped -8.15% after 4 min (stop slipped past -6%). Top kills: 1h vol 109, liq 82 (mostly dead $0 pairs), score 68, top10 48, rug history 26. Fixes: dead pairs skip RugCheck; price check every 10s. User decision: 1h vol min 50k -> 25k, add smart wallets.
 
 ## Tickets (frontier)
-- [ ] **Review first overnight results** `wayfinder:grilling` — kill-reason mix, trades, P&L; are filters too strict? Blocks the tickets below.
+- [ ] **Review results after 2-3 days** `wayfinder:grilling` — with smart wallets + vol 25k: trade count, win rate, P&L.
 - [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
 
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.
