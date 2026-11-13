@@ -15,3 +15,6 @@ Overnight without GUI: `nohup python3 desk.py > desk.out 2>&1 &`
 Outputs: `logs/kill.jsonl` (every kill + reason + facts), `logs/trade.jsonl`, `logs/events.jsonl`, `state.json` (paper book, resumes on restart).
 Optional `smart_wallets.txt`: one address per line. Without it the smart-wallet factor scores 0 (max score 85).
 Thresholds in `CFG` at top of `desk.py`. Open questions: `docs/wayfinder-map.md`.
+
+Cloud (always on, phone via Tailscale): on a fresh Debian VM run
+`curl -fsSL https://raw.githubusercontent.com/zsurann/MrTrader/claude/brave-turing-8snpk9/deploy/setup.sh | bash`

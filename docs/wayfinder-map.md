@@ -15,6 +15,8 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 - Risk: stop −6% set before fill; trail arms at +12%, trails 6% under peak. 1% slippage each side.
 - Executor: 8% of equity per trade, asserted. One entry per mint ever.
 
+- Hosting: Google Cloud e2-micro (free tier), systemd service, desk auto-resumes after reboot. Phone access via Tailscale serve (private, no public port). User choice.
+
 ## Tickets (frontier)
 - [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
 - [ ] **Smart wallet list** `wayfinder:grilling` — which wallets count as smart; how to source/refresh `smart_wallets.txt`.

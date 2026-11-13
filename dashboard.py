@@ -32,8 +32,8 @@ def desk_pid():
                 return None
         except ChildProcessError:
             pass  # started by an earlier dashboard
-        os.kill(pid, 0)
-        return pid
+        # cmdline is empty for zombies and differs if the pid was reused
+        return pid if "desk.py" in open(f"/proc/{pid}/cmdline").read() else None
     except (OSError, ValueError):
         return None
 
@@ -99,6 +99,12 @@ $('ev').innerHTML=tbl(['Ora','Tipo','Dettaglio'],d.events.map(e=>`<tr><td>${esc(
 load();setInterval(load,5000);</script></body></html>"""
 
 
+def start_desk():
+    p = subprocess.Popen([sys.executable, os.path.join(DIR, "desk.py")], cwd=DIR, start_new_session=True,
+                         stdout=open(os.path.join(DIR, "desk.out"), "a"), stderr=subprocess.STDOUT)
+    open(PID, "w").write(str(p.pid))
+
+
 class H(BaseHTTPRequestHandler):
     def send(self, body, ctype="application/json"):
         self.send_response(200)
@@ -114,11 +120,10 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/start" and not desk_pid():
-            p = subprocess.Popen([sys.executable, os.path.join(DIR, "desk.py")], cwd=DIR, start_new_session=True,
-                                 stdout=open(os.path.join(DIR, "desk.out"), "a"), stderr=subprocess.STDOUT)
-            open(PID, "w").write(str(p.pid))
+            start_desk()
         elif self.path == "/stop" and desk_pid():
             os.kill(desk_pid(), signal.SIGTERM)
+            os.remove(PID)  # no pid file = user wants it off, so no autostart after reboot
         self.send("{}")
 
     def log_message(self, *a):
@@ -126,5 +131,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if os.path.exists(PID) and not desk_pid():
+        start_desk()  # desk was on when the machine/dashboard went down: resume it
     print("Apri nel browser: http://localhost:8050   (Ctrl+C per chiudere)")
     ThreadingHTTPServer(("127.0.0.1", 8050), H).serve_forever()
