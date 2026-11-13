@@ -19,10 +19,12 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - Deployed on GCP, running overnight from 2026-11-13 (paper). Scout widened to Gecko busiest/trending pools.
 
+- Smart wallets: user copies from GMGN Smart Money, pastes in dashboard; desk checks on-chain holdings via Solana RPC (getTokenAccountsByOwner). User choice.
+
 ## Tickets (frontier)
 - [ ] **Review first overnight results** `wayfinder:grilling` — kill-reason mix, trades, P&L; are filters too strict? Blocks the tickets below.
 - [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
-- [ ] **Smart wallet list** `wayfinder:grilling` — which wallets count as smart; how to source/refresh `smart_wallets.txt`.
+
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.
 - [x] **Validate field names on live data** `wayfinder:task` — DexScreener, RugCheck OK on live run 2; GeckoTerminal OK but 429 on bursts (throttled). RugCheck `insider` field confirmed live (run 3). Full pipeline reached Analyst (FOOD scored 55.4).
 

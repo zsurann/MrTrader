@@ -55,8 +55,10 @@ class T(unittest.TestCase):
 
     def test_analyst_threshold(self):
         c = {**self.cand()[0], "holders": 3000, "owners": ["W1", "W2", "W3"]}
-        a = desk.Analyst(); a.smart = {"W1", "W2", "W3"}
-        self.assertGreaterEqual(a.run(c)["score"], 70)
+        a = desk.Analyst()
+        self.assertGreaterEqual(desk.Analyst.score(c, {"W1", "W2", "W3"})["smart"], 1)
+        self.assertEqual(desk.Analyst.score(c, set())["smart"], 0)
+        self.assertGreaterEqual(sum(a.W[k] * v for k, v in desk.Analyst.score(c, {"W1", "W2", "W3"}).items()), 70)
         weak = {**self.cand(priceChange={"h1": 2, "m5": 0}, txns={"h1": {"buys": 100, "sells": 120}})[0],
                 "holders": 50, "owners": []}
         self.assertIsNone(a.run(weak))
@@ -91,6 +93,18 @@ class T(unittest.TestCase):
         self.assertEqual(dashboard.reason_kind("score 55.4 < 70"), "score < 70")
         self.assertEqual(dashboard.reason_kind("mint authority not revoked"), "mint authority not revoked")
         self.assertEqual(dashboard.reason_kind("LP burned/locked 0% < 90%"), "LP burned/locked < 90%")
+
+    def test_smart_wallets(self):
+        self.assertTrue(desk.is_wallet("7Sbo9Re2ofWBmLSjG7QzGpkn AGuLnLZCrDYSUa8meNcH".replace(" ", "")))
+        self.assertFalse(desk.is_wallet("ciao"))
+        self.assertFalse(desk.is_wallet("0OIl" * 10))
+        held = {"result": {"value": [{"account": {"data": {"parsed": {"info": {"tokenAmount": {"uiAmount": 5.0}}}}}}]}}
+        empty = {"result": {"value": []}}
+        orig, desk.get = desk.get, lambda url, body=None: held if body["params"][0] == "A" else empty
+        try:
+            self.assertEqual(desk.smart_holders("MINT", ["A", "B"]), {"A"})
+        finally:
+            desk.get = orig
 
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):

@@ -4,7 +4,7 @@ Run:  python desk.py            (loops forever, paper mode)
       python desk.py --once     (one cycle)
 Data: DexScreener + GeckoTerminal (pairs/metrics), RugCheck (authorities, LP, holders, insiders).
 """
-import json, os, sys, time, urllib.request
+import json, os, re, sys, time, urllib.request
 
 CFG = dict(
     age_min_h=0.5, age_max_h=72, mcap_min=300_000, mcap_max=20_000_000,
@@ -14,15 +14,18 @@ CFG = dict(
     slippage=0.01, start_equity=10_000, scan_every_s=120, tick_s=20, kill_cache_s=1800,
 )
 DS, RC = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1"
+RPC = os.environ.get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 GT = "https://api.geckoterminal.com/api/v2/networks/solana"
 DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS, STATE = os.path.join(DIR, "logs"), os.path.join(DIR, "state.json")
 
 
-def get(url):
+def get(url, body=None):
+    """GET, or POST JSON when body is given. None on failure (logged)."""
     for i in range(3):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "paper-desk/1.0", "Accept": "application/json"})
+            req = urllib.request.Request(url, data=body and json.dumps(body).encode(), headers={
+                "User-Agent": "paper-desk/1.0", "Accept": "application/json", "Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=15) as r:
                 return json.load(r)
         except Exception as e:
@@ -165,32 +168,48 @@ class Filter:
         return r, fx
 
 
+def is_wallet(s):
+    return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", s))  # Solana base58 address
+
+
 def load_smart_wallets():
     path = os.path.join(DIR, "smart_wallets.txt")
     if not os.path.exists(path):
         return set()
-    return {l.strip() for l in open(path) if l.strip() and not l.startswith("#")}
+    return {l.strip() for l in open(path) if is_wallet(l.strip())}
+
+
+def smart_holders(mint, wallets):
+    """On-chain: which smart wallets currently hold this token (Solana RPC)."""
+    hits = set()
+    for w in wallets:
+        r = get(RPC, {"jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+                      "params": [w, {"mint": mint}, {"encoding": "jsonParsed"}]})
+        accts = ((r or {}).get("result") or {}).get("value") or []
+        if any(f(a["account"]["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount")) > 0 for a in accts):
+            hits.add(w)
+        time.sleep(0.15)  # public RPC: ~100 req/10s
+    return hits
 
 
 class Analyst:
     """0-100 score. Only >= score_min passes."""
     W = dict(momentum=20, buyers=15, buy_sell=20, holder_growth=15, liq_mcap=15, smart=15)
 
-    def __init__(self):
-        self.smart = load_smart_wallets()
-
     def run(self, c):
-        s = self.score(c, self.smart)
+        smart = load_smart_wallets()  # re-read: list is edited from the dashboard
+        hits = (smart & set(c.get("owners") or [])) | (smart_holders(c["mint"], smart) if smart else set())
+        s = self.score(c, hits)
         total = round(sum(self.W[k] * v for k, v in s.items()), 1)
         if total < CFG["score_min"]:
             Logger.log("kill", agent="Analyst", mint=c["mint"], symbol=c.get("symbol"),
                        reasons=[f"score {total} < {CFG['score_min']}"], facts=s)
             return None
-        Logger.log("signal", mint=c["mint"], symbol=c.get("symbol"), score=total, parts=s)
+        Logger.log("signal", mint=c["mint"], symbol=c.get("symbol"), score=total, parts=s, smart_wallets=sorted(hits))
         return handoff({**c, "score": total, "price": f(c["pair"].get("priceUsd"))}, ["mint", "score", "price"], "Analyst", "Risk")
 
     @staticmethod
-    def score(c, smart):
+    def score(c, hits):
         p = c["pair"]
         h1, m5 = p.get("txns", {}).get("h1", {}), p.get("priceChange", {})
         buys, sells = f(h1.get("buys")), f(h1.get("sells"))
@@ -201,7 +220,7 @@ class Analyst:
             buy_sell=clip((buys / max(sells, 1) - 1) / 1.0),  # 2:1 buys = full marks
             holder_growth=clip(c["holders"] / max(c["age_h"], 0.5) / 200),  # holders gained per hour since launch
             liq_mcap=clip(f(p.get("liquidity", {}).get("usd")) / max(c["mcap"], 1) / 0.15),
-            smart=clip(len(smart & set(c.get("owners") or [])) / 3),
+            smart=clip(len(hits) / 3),  # 3+ smart wallets holding = full marks
         )
 
 
