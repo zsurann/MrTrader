@@ -8,7 +8,9 @@ python3 desk.py --once   # one cycle
 python3 -m unittest test_desk
 ```
 
-Overnight: `nohup python3 desk.py > desk.out 2>&1 &`
+Dashboard (GUI): `python3 dashboard.py`, then open http://localhost:8050 — Start/Stop buttons, equity, positions, trades, kills.
+
+Overnight without GUI: `nohup python3 desk.py > desk.out 2>&1 &`
 
 Outputs: `logs/kill.jsonl` (every kill + reason + facts), `logs/trade.jsonl`, `logs/events.jsonl`, `state.json` (paper book, resumes on restart).
 Optional `smart_wallets.txt`: one address per line. Without it the smart-wallet factor scores 0 (max score 85).

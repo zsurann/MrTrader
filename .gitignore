@@ -3,3 +3,5 @@ state.json
 state.json.tmp
 __pycache__/
 smart_wallets.txt
+desk.pid
+desk.out

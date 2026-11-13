@@ -85,6 +85,13 @@ class T(unittest.TestCase):
         self.assertEqual(desk.gecko_mints(resp), ["ABC"])
         self.assertEqual(desk.gecko_mints(None), [])
 
+    def test_dashboard_reason_kind(self):
+        import dashboard
+        self.assertEqual(dashboard.reason_kind("1h vol $20,982 < $50,000"), "1h vol < $50,000")
+        self.assertEqual(dashboard.reason_kind("score 55.4 < 70"), "score < 70")
+        self.assertEqual(dashboard.reason_kind("mint authority not revoked"), "mint authority not revoked")
+        self.assertEqual(dashboard.reason_kind("LP burned/locked 0% < 90%"), "LP burned/locked < 90%")
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")
