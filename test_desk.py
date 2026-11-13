@@ -106,6 +106,15 @@ class T(unittest.TestCase):
         finally:
             desk.get = orig
 
+    def test_filter_skips_rugcheck_on_dead_pair(self):
+        calls = []
+        orig, desk.get = desk.get, lambda url, body=None: calls.append(url)
+        try:
+            self.assertIsNone(desk.Filter().run(self.cand(liquidity={"usd": 0})[0], NOW))
+        finally:
+            desk.get = orig
+        self.assertEqual(calls, [])
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")

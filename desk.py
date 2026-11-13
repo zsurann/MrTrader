@@ -11,7 +11,7 @@ CFG = dict(
     liq_min=40_000, vol1h_min=50_000, top10_max=25, dev_max=3, bundle_max=10,
     pump1h_max=80, lp_locked_min=90, score_min=70,
     size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06,
-    slippage=0.01, start_equity=10_000, scan_every_s=120, tick_s=20, kill_cache_s=1800,
+    slippage=0.01, start_equity=10_000, scan_every_s=120, tick_s=10, kill_cache_s=1800,
 )
 DS, RC = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1"
 RPC = os.environ.get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
@@ -123,8 +123,11 @@ class Filter:
         now = now or time.time()
         if now - self.cache.get(cand["mint"], 0) < CFG["kill_cache_s"]:
             return None
-        rc = get(f"{RC}/tokens/{cand['mint']}/report")
+        # cheap DexScreener kills first: dead/thin pairs never cost a RugCheck call
+        pre = [x for x in self.check(cand, None)[0] if x != "rugcheck unavailable"]
+        rc = None if pre else get(f"{RC}/tokens/{cand['mint']}/report")
         reasons, facts = self.check(cand, rc)
+        reasons = pre or reasons
         if reasons:
             if not any("unavailable" in x for x in reasons):  # missing data: kill now, retry next scan
                 self.cache[cand["mint"]] = now
