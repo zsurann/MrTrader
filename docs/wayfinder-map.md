@@ -19,7 +19,7 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 - [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
 - [ ] **Smart wallet list** `wayfinder:grilling` — which wallets count as smart; how to source/refresh `smart_wallets.txt`.
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.
-- [x] **Validate field names on live data** `wayfinder:task` — DexScreener, RugCheck OK on live run 2; GeckoTerminal OK but 429 on bursts (throttled). RugCheck `insider` field not yet seen live.
+- [x] **Validate field names on live data** `wayfinder:task` — DexScreener, RugCheck OK on live run 2; GeckoTerminal OK but 429 on bursts (throttled). RugCheck `insider` field confirmed live (run 3). Full pipeline reached Analyst (FOOD scored 55.4).
 
 ## Not yet specified
 - Live execution (Jupiter swaps, wallet key handling, priority fees) — after paper results.
