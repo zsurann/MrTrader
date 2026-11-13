@@ -17,7 +17,7 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 - [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
 - [ ] **Smart wallet list** `wayfinder:grilling` — which wallets count as smart; how to source/refresh `smart_wallets.txt`.
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.
-- [ ] **Validate RugCheck/trench field names on live data** `wayfinder:task` — first overnight run; check `logs/events.jsonl` for http_error and kill reasons dominated by "unavailable".
+- [~] **Validate RugCheck/trench field names on live data** `wayfinder:task` (claimed: user) — first overnight run; check `logs/events.jsonl` for http_error and kill reasons dominated by "unavailable".
 
 ## Not yet specified
 - Live execution (Jupiter swaps, wallet key handling, priority fees) — after paper results.
