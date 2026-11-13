@@ -5,3 +5,5 @@ __pycache__/
 smart_wallets.txt
 desk.pid
 desk.out
+smart_wallets_auto.txt
+*.tmp

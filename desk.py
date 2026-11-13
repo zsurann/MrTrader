@@ -116,8 +116,9 @@ class Scout:
 
 class Filter:
     """Kills on any red flag. Missing safety data = kill (fail closed)."""
-    def __init__(self):
+    def __init__(self, seen=None):
         self.cache = {}  # mint -> time of last kill, avoids re-hammering APIs
+        self.seen = {} if seen is None else seen  # mint -> first price + holders, for wallet learning
 
     def run(self, cand, now=None):
         now = now or time.time()
@@ -128,6 +129,9 @@ class Filter:
         rc = None if pre else get(f"{RC}/tokens/{cand['mint']}/report")
         reasons, facts = self.check(cand, rc)
         reasons = pre or reasons
+        price = f(cand["pair"].get("priceUsd"))
+        if rc and price > 0 and cand["mint"] not in self.seen:
+            self.seen[cand["mint"]] = {"p": price, "t": now, "w": facts.get("owners") or []}
         if reasons:
             if not any("unavailable" in x for x in reasons):  # missing data: kill now, retry next scan
                 self.cache[cand["mint"]] = now
@@ -158,7 +162,8 @@ class Filter:
         creator = rc.get("creator")
         dev = sum(f(h.get("pct")) for h in holders if creator and creator in (h.get("owner"), h.get("address")))
         fx.update(top10_pct=top10, dev_pct=dev, holders=rc.get("totalHolders") or 0,
-                  owners=[h.get("owner") or h.get("address") for h in holders])
+                  owners=[h.get("owner") or h.get("address") for h in holders  # insiders/dev are not "smart"
+                          if not h.get("insider") and creator not in (h.get("owner"), h.get("address"))])
         if not holders: r.append("no holder data")
         if top10 > CFG["top10_max"]: r.append(f"top10 {top10:.1f}% > {CFG['top10_max']}%")
         if dev > CFG["dev_max"]: r.append(f"dev holds {dev:.1f}% > {CFG['dev_max']}%")
@@ -175,11 +180,41 @@ def is_wallet(s):
     return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", s))  # Solana base58 address
 
 
-def load_smart_wallets():
-    path = os.path.join(DIR, "smart_wallets.txt")
-    if not os.path.exists(path):
-        return set()
-    return {l.strip() for l in open(path) if is_wallet(l.strip())}
+def load_smart_wallets(auto=True):
+    """Manual list (dashboard) + wallets the desk learned itself (smart_wallets_auto.txt)."""
+    out = set()
+    for name in ("smart_wallets.txt", "smart_wallets_auto.txt") if auto else ("smart_wallets.txt",):
+        path = os.path.join(DIR, name)
+        if os.path.exists(path):
+            out |= {l.strip() for l in open(path) if is_wallet(l.strip())}
+    return out
+
+
+def learn_wallets(st, now=None):
+    """Coin we saw went 2x+ within 72h -> its top holders (non-insider) at first sight get a win.
+    2+ wins = smart. shortcut: top holders only (RugCheck), not every early buyer; use a tx indexer for that."""
+    now = now or time.time()
+    seen, wins = st.setdefault("seen", {}), st.setdefault("wins", {})
+    for m in [m for m, v in seen.items() if now - v["t"] > 72 * 3600]:
+        del seen[m]
+    mints = list(seen)
+    for i in range(0, len(mints), 30):
+        best = {}
+        for p in get(f"{DS}/tokens/v1/solana/{','.join(mints[i:i + 30])}") or []:
+            m = p["baseToken"]["address"]
+            if f(p.get("liquidity", {}).get("usd")) >= best.get(m, (0, -1))[1]:
+                best[m] = (f(p.get("priceUsd")), f(p.get("liquidity", {}).get("usd")))
+        for m, (px, _) in best.items():
+            if m in seen and px >= 2 * seen[m]["p"]:
+                v = seen.pop(m)
+                for w in v["w"]:
+                    wins[w] = wins.get(w, 0) + 1
+                Logger.log("learn", mint=m, x=round(px / v["p"], 1), holders=len(v["w"]))
+    smart = sorted(w for w, n in wins.items() if n >= 2 and is_wallet(w))
+    tmp = os.path.join(DIR, "smart_wallets_auto.txt.tmp")
+    open(tmp, "w").write("\n".join(smart) + "\n")
+    os.replace(tmp, os.path.join(DIR, "smart_wallets_auto.txt"))
+    return smart
 
 
 def smart_holders(mint, wallets):
@@ -308,11 +343,15 @@ def monitor(st, ex):
 
 
 def main(once=False):
-    st, scout, filt, analyst, risk = load_state(), Scout(), Filter(), Analyst(), Risk()
-    ex, last_scan = Executor(st), 0
+    st = load_state()
+    scout, filt, analyst, risk = Scout(), Filter(st.setdefault("seen", {})), Analyst(), Risk()
+    ex, last_scan, last_learn = Executor(st), 0, 0
     Logger.log("start", mode="paper", equity=round(equity(st), 2), cfg=CFG)
     while True:
         monitor(st, ex)
+        if time.time() - last_learn >= 600:
+            last_learn = time.time()
+            Logger.log("smart_wallets", learned=len(learn_wallets(st)), watching=len(st["seen"]))
         if time.time() - last_scan >= CFG["scan_every_s"]:
             last_scan = time.time()
             cands = scout.run()

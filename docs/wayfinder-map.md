@@ -19,7 +19,7 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - Deployed on GCP, running overnight from 2026-11-13 (paper). Scout widened to Gecko busiest/trending pools.
 
-- Smart wallets: user copies from GMGN Smart Money, pastes in dashboard; desk checks on-chain holdings via Solana RPC (getTokenAccountsByOwner). User choice.
+- Smart wallets: user delegated choice; GMGN unreachable from agent and addresses must not be invented -> desk learns them: top non-insider holders of coins it saw that went 2x+ within 72h, 2+ wins = smart (smart_wallets_auto.txt). Manual paste in dashboard still possible; desk checks on-chain holdings via Solana RPC (getTokenAccountsByOwner). User choice.
 
 - First ~6h (2026-11-13): 1 trade, WANTED score 71.9, stopped -8.15% after 4 min (stop slipped past -6%). Top kills: 1h vol 109, liq 82 (mostly dead $0 pairs), score 68, top10 48, rug history 26. Fixes: dead pairs skip RugCheck; price check every 10s. User decision: 1h vol min 50k -> 25k, add smart wallets.
 

@@ -63,7 +63,8 @@ def summary():
         "top_reasons": reasons.most_common(8),
         "wins": sum(t["pnl_usd"] > 0 for t in sells), "losses": sum(t["pnl_usd"] <= 0 for t in sells),
         "events": tail_jsonl("events.jsonl", 8)[::-1],
-        "wallets": sorted(load_smart_wallets()),
+        "wallets": sorted(load_smart_wallets(auto=False)),
+        "auto_wallets": len(load_smart_wallets() - load_smart_wallets(auto=False)),
     }
 
 
@@ -86,7 +87,7 @@ h1{font-size:20px;margin:0 0 12px}h2{font-size:15px;margin:0 0 8px;color:var(--m
 <div class="card"><h2>Perché scarta (motivi più frequenti)</h2><table id="why"></table></div>
 <div class="card"><h2>Ultimi scarti</h2><table id="kills"></table></div>
 <div class="card"><h2>Smart wallet (<span id="nw">0</span>)</h2>
-<p class="m">Incolla gli indirizzi, uno per riga. Quelli non validi vengono scartati.</p>
+<p class="m">Imparati da solo: <b id="nauto">0</b> (chi teneva monete poi salite 2x, almeno 2 volte). Puoi aggiungerne a mano qui sotto, uno per riga.</p>
 <textarea id="wl_in" rows="6" style="width:100%;box-sizing:border-box;background:#0f1115;color:var(--fg);border:1px solid #333;border-radius:8px;padding:8px;font:12px monospace"></textarea>
 <button style="background:var(--g)" onclick="saveW()">Salva lista</button> <span id="wmsg" class="g"></span></div>
 <div class="card"><h2>Attività</h2><table id="ev"></table></div>
@@ -101,7 +102,7 @@ async function act(a){await fetch('/'+a,{method:'POST'});load()}
 async function load(){const d=await (await fetch('/api')).json();
 $('run').innerHTML=d.running?'<span class="g">● acceso</span>':'<span class="r">● spento</span>';
 $('eq').innerHTML=usd(d.equity)+' <span class="'+(d.equity>=10000?'g':'r')+'">'+((d.equity/10000-1)*100).toFixed(2)+'%</span>';
-$('nw').textContent=d.wallets.length;if(!wLoaded){$('wl_in').value=d.wallets.join('\\n');wLoaded=true}
+$('nw').textContent=d.wallets.length+d.auto_wallets;$('nauto').textContent=d.auto_wallets;if(!wLoaded){$('wl_in').value=d.wallets.join('\\n');wLoaded=true}
 $('cash').textContent=usd(d.cash);$('wl').textContent=d.wins+' / '+d.losses;$('np').textContent=d.positions.length;
 $('pos').innerHTML=tbl(['Moneta','Investito','Entrata','Ora','Stop','P&L'],d.positions.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${usd(p.usd)}</td><td>${p.entry.toPrecision(4)}</td><td>${p.last.toPrecision(4)}</td><td>${p.stop.toPrecision(4)}${p.trailing?' (trail)':''}</td><td class="${p.pnl_pct>=0?'g':'r'}">${p.pnl_pct}%</td></tr>`));
 $('tr').innerHTML=tbl(['Ora','Lato','Moneta','Dettaglio'],d.trades.map(t=>`<tr><td>${hm(t.ts)}</td><td>${t.side=='buy'?'COMPRA':'VENDE'}</td><td>${esc(t.symbol)}</td><td>${t.side=='buy'?'voto '+t.score+', '+usd(t.usd):`<span class="${t.pnl_usd>0?'g':'r'}">${t.pnl_pct}% (${usd(t.pnl_usd)})</span> ${esc(t.reason)}`}</td></tr>`));

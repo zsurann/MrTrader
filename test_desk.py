@@ -115,6 +115,22 @@ class T(unittest.TestCase):
             desk.get = orig
         self.assertEqual(calls, [])
 
+    def test_learn_wallets(self):
+        d = tempfile.mkdtemp(); orig_dir, desk.DIR = desk.DIR, d
+        W1, W2, W3 = "7Sbo9Re2ofWBmLSjG7QzGpknAGuLnLZCrDYSUa8meNcH", "DLRbZCdNGeXywLcUi2tMhKkdkwxiPsU6xhGk4Fw8mAbZ", "BTRwihySd7U8W6JKuyVWgm9ovndqnsrEPorvuzJyg4gm"
+        st = {"seen": {"A": {"p": 1.0, "t": NOW, "w": [W1, W2]}, "B": {"p": 1.0, "t": NOW, "w": [W1, W3]},
+                       "C": {"p": 1.0, "t": NOW, "w": [W2]}, "OLD": {"p": 1.0, "t": NOW - 80 * 3600, "w": [W3]}}}
+        px = {"A": "2.5", "B": "2.0", "C": "1.5"}
+        orig_get, desk.get = desk.get, lambda url, body=None: [
+            {"baseToken": {"address": m}, "priceUsd": px[m], "liquidity": {"usd": 1}} for m in px]
+        try:
+            self.assertEqual(desk.learn_wallets(st, NOW), [W1])          # W1 held 2 winners
+            self.assertEqual(set(st["seen"]), {"C"})                        # winners consumed, old pruned
+            self.assertEqual(desk.load_smart_wallets(), {W1})
+            self.assertEqual(desk.load_smart_wallets(auto=False), set())
+        finally:
+            desk.get, desk.DIR = orig_get, orig_dir
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")
