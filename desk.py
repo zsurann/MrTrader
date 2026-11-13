@@ -55,7 +55,7 @@ class Logger:
     @staticmethod
     def log(kind, **data):
         os.makedirs(LOGS, exist_ok=True)
-        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind, **data}
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": kind, **data}
         with open(os.path.join(LOGS, f"{kind if kind in ('kill', 'trade') else 'events'}.jsonl"), "a") as fh:
             fh.write(json.dumps(rec) + "\n")
         if kind != "kill":
@@ -79,12 +79,14 @@ class Scout:
             for t in get(DS + path) or []:
                 if t.get("chainId") == "solana" and t.get("tokenAddress") not in mints:
                     mints.append(t["tokenAddress"])
-        for path in ("new_pools", "trending_pools"):
-            for page in (1, 2, 3):
-                time.sleep(2.5)  # GeckoTerminal free tier rate-limits bursts (429)
-                for m in gecko_mints(get(f"{GT}/{path}?page={page}")):
-                    if m not in mints:
-                        mints.append(m)
+        # new_pools is all <30min old (Scout drops those); busiest + trending pools cover the 30m-72h window
+        gecko = [f"trending_pools?duration={d}" for d in ("5m", "1h", "6h", "24h")] + \
+                [f"pools?sort={s}&page={p}" for s in ("h24_volume_usd_desc", "h24_tx_count_desc") for p in (1, 2, 3)]
+        for q in gecko:
+            time.sleep(2.5)  # GeckoTerminal free tier rate-limits bursts (429)
+            for m in gecko_mints(get(f"{GT}/{q}")):
+                if m not in mints:
+                    mints.append(m)
         pairs = []
         for i in range(0, len(mints), 30):
             pairs += get(f"{DS}/tokens/v1/solana/{','.join(mints[i:i + 30])}") or []
@@ -298,6 +300,8 @@ def main(once=False):
                     continue
                 c = filt.run(c)
                 sig = c and analyst.run(c)
+                if c and not sig:
+                    filt.cache[c["mint"]] = time.time()  # low score: rescore after kill_cache_s, not every scan
                 order = sig and risk.plan(sig, equity(st), st["cash"])
                 if order:
                     ex.buy(order)

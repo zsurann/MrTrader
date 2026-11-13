@@ -56,7 +56,8 @@ def summary():
         "equity": round(st["cash"] + sum(p["qty"] * p["last"] for p in st["pos"].values()), 2),
         "positions": pos,
         "trades": tail_jsonl("trade.jsonl", 30)[::-1],
-        "kills": [{k_: k.get(k_) for k_ in ("ts", "agent", "symbol", "reasons")} for k in kills[-40:][::-1]],
+        "kills": sorted({k.get("mint"): {k_: k.get(k_) for k_ in ("ts", "agent", "symbol", "reasons")}
+                         for k in kills}.values(), key=lambda k: k["ts"] or "", reverse=True)[:40],  # latest kill per coin
         "top_reasons": reasons.most_common(8),
         "wins": sum(t["pnl_usd"] > 0 for t in sells), "losses": sum(t["pnl_usd"] <= 0 for t in sells),
         "events": tail_jsonl("events.jsonl", 8)[::-1],
@@ -84,6 +85,7 @@ h1{font-size:20px;margin:0 0 12px}h2{font-size:15px;margin:0 0 8px;color:var(--m
 <div class="card"><h2>Attività</h2><table id="ev"></table></div>
 <script>
 const $=id=>document.getElementById(id), usd=x=>'$'+Number(x).toLocaleString('it-IT',{maximumFractionDigits:2});
+const hm=s=>s?new Date(s).toLocaleString('it-IT',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const tbl=(h,rows)=>'<tr>'+h.map(x=>'<th>'+x+'</th>').join('')+'</tr>'+(rows.length?rows.join(''):'<tr><td class="m" colspan="9">niente per ora</td></tr>');
 async function act(a){await fetch('/'+a,{method:'POST'});load()}
@@ -92,10 +94,10 @@ $('run').innerHTML=d.running?'<span class="g">● acceso</span>':'<span class="r
 $('eq').innerHTML=usd(d.equity)+' <span class="'+(d.equity>=10000?'g':'r')+'">'+((d.equity/10000-1)*100).toFixed(2)+'%</span>';
 $('cash').textContent=usd(d.cash);$('wl').textContent=d.wins+' / '+d.losses;$('np').textContent=d.positions.length;
 $('pos').innerHTML=tbl(['Moneta','Investito','Entrata','Ora','Stop','P&L'],d.positions.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${usd(p.usd)}</td><td>${p.entry.toPrecision(4)}</td><td>${p.last.toPrecision(4)}</td><td>${p.stop.toPrecision(4)}${p.trailing?' (trail)':''}</td><td class="${p.pnl_pct>=0?'g':'r'}">${p.pnl_pct}%</td></tr>`));
-$('tr').innerHTML=tbl(['Ora','Lato','Moneta','Dettaglio'],d.trades.map(t=>`<tr><td>${esc(t.ts)}</td><td>${t.side=='buy'?'COMPRA':'VENDE'}</td><td>${esc(t.symbol)}</td><td>${t.side=='buy'?'voto '+t.score+', '+usd(t.usd):`<span class="${t.pnl_usd>0?'g':'r'}">${t.pnl_pct}% (${usd(t.pnl_usd)})</span> ${esc(t.reason)}`}</td></tr>`));
+$('tr').innerHTML=tbl(['Ora','Lato','Moneta','Dettaglio'],d.trades.map(t=>`<tr><td>${hm(t.ts)}</td><td>${t.side=='buy'?'COMPRA':'VENDE'}</td><td>${esc(t.symbol)}</td><td>${t.side=='buy'?'voto '+t.score+', '+usd(t.usd):`<span class="${t.pnl_usd>0?'g':'r'}">${t.pnl_pct}% (${usd(t.pnl_usd)})</span> ${esc(t.reason)}`}</td></tr>`));
 $('why').innerHTML=tbl(['Motivo','Volte'],d.top_reasons.map(r=>`<tr><td>${esc(r[0])}</td><td>${r[1]}</td></tr>`));
-$('kills').innerHTML=tbl(['Ora','Agente','Moneta','Motivi'],d.kills.map(k=>`<tr><td>${esc(k.ts)}</td><td>${esc(k.agent)}</td><td>${esc(k.symbol)}</td><td>${esc((k.reasons||[]).join(' · '))}</td></tr>`));
-$('ev').innerHTML=tbl(['Ora','Tipo','Dettaglio'],d.events.map(e=>`<tr><td>${esc(e.ts)}</td><td>${esc(e.kind)}</td><td class="m">${esc(JSON.stringify(e).slice(0,140))}</td></tr>`));}
+$('kills').innerHTML=tbl(['Ora','Agente','Moneta','Motivi'],d.kills.map(k=>`<tr><td>${hm(k.ts)}</td><td>${esc(k.agent)}</td><td>${esc(k.symbol)}</td><td>${esc((k.reasons||[]).join(' · '))}</td></tr>`));
+$('ev').innerHTML=tbl(['Ora','Tipo','Dettaglio'],d.events.map(e=>`<tr><td>${hm(e.ts)}</td><td>${esc(e.kind)}</td><td class="m">${esc(JSON.stringify(e).slice(0,140))}</td></tr>`));}
 load();setInterval(load,5000);</script></body></html>"""
 
 
