@@ -19,11 +19,11 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS, STATE = os.path.join(DIR, "logs"), os.path.join(DIR, "state.json")
 
 
-def get(url):
+def get(url, timeout=15):
     for i in range(3):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "paper-desk/1.0", "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.load(r)
         except Exception as e:
             err = e
@@ -118,10 +118,11 @@ class Filter:
         if now - self.cache.get(cand["mint"], 0) < CFG["kill_cache_s"]:
             return None
         rc = get(f"{RC}/tokens/{cand['mint']}/report")
-        tb = get(f"{TB}/bundle/bundle_advanced/{cand['mint']}")
+        tb = get(f"{TB}/bundle/bundle_advanced/{cand['mint']}", timeout=45)  # trench.bot is slow
         reasons, facts = self.check(cand, rc, tb)
         if reasons:
-            self.cache[cand["mint"]] = now
+            if not any("unavailable" in x for x in reasons):  # missing data: kill now, retry next scan
+                self.cache[cand["mint"]] = now
             Logger.log("kill", agent="Filter", mint=cand["mint"], symbol=cand.get("symbol"), reasons=reasons, facts=facts)
             return None
         return handoff({**cand, "rc": rc, **facts}, ["mint", "pair", "rc", "holders"], "Filter", "Analyst")

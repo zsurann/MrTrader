@@ -9,6 +9,8 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 ## Decisions so far
 - Data sources: DexScreener (pairs, price, vol, txns), RugCheck report (mint/freeze, LP lock, holders, creator, rug risks), trench.bot (bundle %). Missing safety data = kill.
+- Bundle data missing (trench.bot timed out on first live run): kill, no cache, retry next scan; trench timeout 45s. User choice.
+- Live run 1: DexScreener OK; added GeckoTerminal new/trending pools to Scout (only 1 candidate before).
 - Analyst weights: momentum 20, buyers 15, buy/sell 20, holder growth 15, liq/mcap 15, smart wallets 15. Pass ≥70.
 - Risk: stop −6% set before fill; trail arms at +12%, trails 6% under peak. 1% slippage each side.
 - Executor: 8% of equity per trade, asserted. One entry per mint ever.
