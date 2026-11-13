@@ -8,8 +8,8 @@ Paper desk running overnight on real on-chain data, 6 agents with hard handoffs,
 Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 ## Decisions so far
-- Data sources: DexScreener (pairs, price, vol, txns), RugCheck report (mint/freeze, LP lock, holders, creator, rug risks), trench.bot (bundle %). Missing safety data = kill.
-- Bundle data missing (trench.bot timed out on first live run): kill, no cache, retry next scan; trench timeout 45s. User choice.
+- Data sources: DexScreener (pairs, price, vol, txns), RugCheck report (mint/freeze, LP lock, holders, creator, rug risks), ~~trench.bot~~. Missing safety data = kill.
+- Bundle: trench.bot never answered (5/5 timeouts). Replaced by RugCheck insider-held % > 10% = kill. User choice.
 - Live run 1: DexScreener OK; added GeckoTerminal new/trending pools to Scout (only 1 candidate before).
 - Analyst weights: momentum 20, buyers 15, buy/sell 20, holder growth 15, liq/mcap 15, smart wallets 15. Pass ≥70.
 - Risk: stop −6% set before fill; trail arms at +12%, trails 6% under peak. 1% slippage each side.
@@ -19,7 +19,7 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 - [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
 - [ ] **Smart wallet list** `wayfinder:grilling` — which wallets count as smart; how to source/refresh `smart_wallets.txt`.
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.
-- [~] **Validate RugCheck/trench field names on live data** `wayfinder:task` (claimed: user) — first overnight run; check `logs/events.jsonl` for http_error and kill reasons dominated by "unavailable".
+- [x] **Validate field names on live data** `wayfinder:task` — DexScreener, RugCheck OK on live run 2; GeckoTerminal OK but 429 on bursts (throttled). RugCheck `insider` field not yet seen live.
 
 ## Not yet specified
 - Live execution (Jupiter swaps, wallet key handling, priority fees) — after paper results.

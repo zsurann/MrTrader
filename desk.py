@@ -2,7 +2,7 @@
 
 Run:  python desk.py            (loops forever, paper mode)
       python desk.py --once     (one cycle)
-Data: DexScreener + GeckoTerminal (pairs/metrics), RugCheck (authorities, LP, holders), trench.bot (bundles).
+Data: DexScreener + GeckoTerminal (pairs/metrics), RugCheck (authorities, LP, holders, insiders).
 """
 import json, os, sys, time, urllib.request
 
@@ -13,17 +13,17 @@ CFG = dict(
     size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06,
     slippage=0.01, start_equity=10_000, scan_every_s=120, tick_s=20, kill_cache_s=1800,
 )
-DS, RC, TB = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1", "https://trench.bot/api"
+DS, RC = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1"
 GT = "https://api.geckoterminal.com/api/v2/networks/solana"
 DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS, STATE = os.path.join(DIR, "logs"), os.path.join(DIR, "state.json")
 
 
-def get(url, timeout=15):
+def get(url):
     for i in range(3):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "paper-desk/1.0", "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=15) as r:
                 return json.load(r)
         except Exception as e:
             err = e
@@ -81,6 +81,7 @@ class Scout:
                     mints.append(t["tokenAddress"])
         for path in ("new_pools", "trending_pools"):
             for page in (1, 2, 3):
+                time.sleep(2.5)  # GeckoTerminal free tier rate-limits bursts (429)
                 for m in gecko_mints(get(f"{GT}/{path}?page={page}")):
                     if m not in mints:
                         mints.append(m)
@@ -118,17 +119,16 @@ class Filter:
         if now - self.cache.get(cand["mint"], 0) < CFG["kill_cache_s"]:
             return None
         rc = get(f"{RC}/tokens/{cand['mint']}/report")
-        tb = get(f"{TB}/bundle/bundle_advanced/{cand['mint']}", timeout=45)  # trench.bot is slow
-        reasons, facts = self.check(cand, rc, tb)
+        reasons, facts = self.check(cand, rc)
         if reasons:
             if not any("unavailable" in x for x in reasons):  # missing data: kill now, retry next scan
                 self.cache[cand["mint"]] = now
-            Logger.log("kill", agent="Filter", mint=cand["mint"], symbol=cand.get("symbol"), reasons=reasons, facts=facts)
+            Logger.log("kill", agent="Filter", mint=cand["mint"], symbol=cand.get("symbol"), reasons=reasons, facts={k: v for k, v in facts.items() if k != "owners"})
             return None
         return handoff({**cand, "rc": rc, **facts}, ["mint", "pair", "rc", "holders"], "Filter", "Analyst")
 
     @staticmethod
-    def check(cand, rc, tb):
+    def check(cand, rc):
         p, r, fx = cand["pair"], [], {}
         liq, vol = f(p.get("liquidity", {}).get("usd")), f(p.get("volume", {}).get("h1"))
         ch1 = f(p.get("priceChange", {}).get("h1"))
@@ -156,11 +156,10 @@ class Filter:
         if dev > CFG["dev_max"]: r.append(f"dev holds {dev:.1f}% > {CFG['dev_max']}%")
         if rc.get("rugged") or any("rug" in (x.get("name") or "").lower() for x in rc.get("risks") or []):
             r.append("dev/token rug history")
-        b = (tb or {}).get("total_percentage_bundled")
-        if b is None: r.append("bundle data unavailable")
-        else:
-            fx["bundled_pct"] = f(b)
-            if f(b) > CFG["bundle_max"]: r.append(f"bundled {f(b):.1f}% > {CFG['bundle_max']}%")
+        # shortcut: bundle % = supply held by RugCheck-flagged insiders (trench.bot never answered); swap for a real bundle API if one works
+        if holders and not any("insider" in h for h in holders): r.append("insider data unavailable")
+        b = fx["insider_pct"] = sum(f(h.get("pct")) for h in holders if h.get("insider"))
+        if b > CFG["bundle_max"]: r.append(f"insiders/bundle {b:.1f}% > {CFG['bundle_max']}%")
         return r, fx
 
 

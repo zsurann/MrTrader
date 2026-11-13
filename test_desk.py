@@ -14,8 +14,7 @@ def pair(**kw):
 
 RC = {"mintAuthority": None, "freezeAuthority": None, "creator": "DEV", "totalHolders": 3000,
       "markets": [{"lp": {"lpLockedPct": 100}}], "knownAccounts": {"POOL": {"type": "AMM"}}, "risks": [],
-      "topHolders": [{"address": "POOL", "pct": 40}] + [{"address": f"H{i}", "owner": f"W{i}", "pct": 2} for i in range(10)]}
-TB = {"total_percentage_bundled": 3}
+      "topHolders": [{"address": "POOL", "pct": 40}] + [{"address": f"H{i}", "owner": f"W{i}", "pct": 2, "insider": i == 0} for i in range(10)]}
 
 
 class T(unittest.TestCase):
@@ -33,24 +32,25 @@ class T(unittest.TestCase):
         self.assertEqual(self.cand(marketCap=25_000_000), [])
 
     def test_filter_clean_passes_pool_excluded(self):
-        r, fx = desk.Filter.check(self.cand()[0], RC, TB)
+        r, fx = desk.Filter.check(self.cand()[0], RC)
         self.assertEqual(r, [])
         self.assertAlmostEqual(fx["top10_pct"], 20)
 
     def test_filter_kills(self):
         c = self.cand()[0]
-        cases = [({**RC, "mintAuthority": "X"}, TB, "mint"), ({**RC, "freezeAuthority": "X"}, TB, "freeze"),
-                 ({**RC, "markets": [{"lp": {"lpLockedPct": 20}}]}, TB, "LP"),
-                 ({**RC, "topHolders": [{"address": "A", "pct": 30}]}, TB, "top10"),
-                 ({**RC, "topHolders": [{"address": "A", "owner": "DEV", "pct": 5}]}, TB, "dev"),
-                 ({**RC, "risks": [{"name": "Creator history of rugged tokens"}]}, TB, "rug"),
-                 (RC, {"total_percentage_bundled": 15}, "bundled"), (RC, None, "bundle data"), (None, TB, "rugcheck")]
-        for rc, tb, word in cases:
-            r, _ = desk.Filter.check(c, rc, tb)
+        cases = [({**RC, "mintAuthority": "X"}, "mint"), ({**RC, "freezeAuthority": "X"}, "freeze"),
+                 ({**RC, "markets": [{"lp": {"lpLockedPct": 20}}]}, "LP"),
+                 ({**RC, "topHolders": [{"address": "A", "pct": 30, "insider": False}]}, "top10"),
+                 ({**RC, "topHolders": [{"address": "A", "owner": "DEV", "pct": 5, "insider": False}]}, "dev"),
+                 ({**RC, "risks": [{"name": "Creator history of rugged tokens"}]}, "rug"),
+                 ({**RC, "topHolders": [{"address": f"I{i}", "pct": 2.2, "insider": True} for i in range(5)]}, "insiders"),
+                 ({**RC, "topHolders": [{"address": "A", "pct": 1}]}, "insider data"), (None, "rugcheck")]
+        for rc, word in cases:
+            r, _ = desk.Filter.check(c, rc)
             self.assertTrue(any(word in x for x in r), (word, r))
         for kw, word in [({"liquidity": {"usd": 30_000}}, "liq"), ({"volume": {"h1": 10_000}}, "1h vol"),
                          ({"priceChange": {"h1": 95}}, "already")]:
-            r, _ = desk.Filter.check(self.cand(**kw)[0], RC, TB)
+            r, _ = desk.Filter.check(self.cand(**kw)[0], RC)
             self.assertTrue(any(word in x for x in r), (word, r))
 
     def test_analyst_threshold(self):
