@@ -80,6 +80,11 @@ class T(unittest.TestCase):
         with self.assertRaises(AssertionError):
             desk.Executor(st).buy({"mint": "M", "usd": 2000, "entry": 1, "stop": 0.94})
 
+    def test_gecko_mints(self):
+        resp = {"data": [{"relationships": {"base_token": {"data": {"id": "solana_ABC"}}}}, {"relationships": {}}]}
+        self.assertEqual(desk.gecko_mints(resp), ["ABC"])
+        self.assertEqual(desk.gecko_mints(None), [])
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")

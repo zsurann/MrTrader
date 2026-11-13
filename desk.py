@@ -2,7 +2,7 @@
 
 Run:  python desk.py            (loops forever, paper mode)
       python desk.py --once     (one cycle)
-Data: DexScreener (pairs/metrics), RugCheck (authorities, LP, holders), trench.bot (bundles).
+Data: DexScreener + GeckoTerminal (pairs/metrics), RugCheck (authorities, LP, holders), trench.bot (bundles).
 """
 import json, os, sys, time, urllib.request
 
@@ -14,6 +14,7 @@ CFG = dict(
     slippage=0.01, start_equity=10_000, scan_every_s=120, tick_s=20, kill_cache_s=1800,
 )
 DS, RC, TB = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1", "https://trench.bot/api"
+GT = "https://api.geckoterminal.com/api/v2/networks/solana"
 DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS, STATE = os.path.join(DIR, "logs"), os.path.join(DIR, "state.json")
 
@@ -61,6 +62,13 @@ class Logger:
             print(json.dumps(rec), flush=True)
 
 
+def gecko_mints(resp):
+    """GeckoTerminal pool list -> base token mints ("solana_<mint>")."""
+    ids = [((p.get("relationships") or {}).get("base_token") or {}).get("data", {}).get("id", "")
+           for p in (resp or {}).get("data") or []]
+    return [i.split("_", 1)[1] for i in ids if i.startswith("solana_")]
+
+
 class Scout:
     """Fresh Solana pairs, 30m-72h old, mcap $300k-$20M."""
     def run(self, now=None):
@@ -71,6 +79,11 @@ class Scout:
             for t in get(DS + path) or []:
                 if t.get("chainId") == "solana" and t.get("tokenAddress") not in mints:
                     mints.append(t["tokenAddress"])
+        for path in ("new_pools", "trending_pools"):
+            for page in (1, 2, 3):
+                for m in gecko_mints(get(f"{GT}/{path}?page={page}")):
+                    if m not in mints:
+                        mints.append(m)
         pairs = []
         for i in range(0, len(mints), 30):
             pairs += get(f"{DS}/tokens/v1/solana/{','.join(mints[i:i + 30])}") or []
