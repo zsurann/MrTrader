@@ -4,7 +4,7 @@ Run:  python desk.py            (loops forever, paper mode)
       python desk.py --once     (one cycle)
 Data: DexScreener + GeckoTerminal (pairs/metrics, unique buyers), RugCheck (authorities, LP, holders, insiders).
 """
-import json, os, re, sys, time, urllib.request
+import json, os, random, re, secrets, sys, time, urllib.request, zlib
 
 CFG = dict(
     age_min_h=0.5, age_max_h=72, mcap_min=300_000, mcap_max=20_000_000,
@@ -12,6 +12,8 @@ CFG = dict(
     pump1h_max=80, lp_locked_min=90, score_min=70,
     size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06,
     fee=0.005, impact_max=0.015, entry_drop_max=0.03,
+    tm_replays=10_000, tm_horizon_min=240, tm_stop_first_max=0.5,   # Time Machine gate
+    day_loss_max=0.03, max_open=5, max_buys_day=20, time_exit_h=4,   # risk limits, time exit
     start_equity=10_000, scan_every_s=120, tick_s=10, kill_cache_s=1800, gecko_gap_s=6.5,
 )
 DS, RC = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1"
@@ -60,6 +62,17 @@ def clip(x):
 def slip(usd, liq):
     """Cost of a market order: fees + constant-product price impact (order vs quote-side reserve = liq/2)."""
     return CFG["fee"] + usd / max(liq / 2, 1)
+
+
+def notify(st, text):
+    """Phone push via ntfy.sh (free app, no account). Topic is random, so only whoever knows it can subscribe."""
+    if not st.get("ntfy"):
+        return
+    try:
+        req = urllib.request.Request(f"https://ntfy.sh/{st['ntfy']}", data=text.encode(), headers={"Title": "MrTrader"})
+        urllib.request.urlopen(req, timeout=5).close()
+    except Exception as e:  # a lost notification must never stop the desk
+        Logger.log("http_error", url="https://ntfy.sh/", error=str(e))
 
 
 class Logger:
@@ -299,6 +312,32 @@ class Analyst:
         )
 
 
+def bars_1m(pair_addr, limit=240):
+    """GeckoTerminal 1-minute OHLCV, oldest first: [(o, h, l, c), ...]. None if unavailable."""
+    rows = (((get(f"{GT}/pools/{pair_addr}/ohlcv/minute?aggregate=1&limit={limit}") or {})
+             .get("data") or {}).get("attributes") or {}).get("ohlcv_list")
+    return [tuple(f(x) for x in r[1:5]) for r in sorted(rows, key=lambda r: r[0])] if rows else None
+
+
+def time_machine(bars, stop_pct, arm_pct, horizon, replays, seed):
+    """trader-timemachine's method on memecoin 1-minute bars: rebuild the next `horizon` minutes `replays` times
+    from the coin's own bars (each bar as open/high/low/close over the previous close), count which comes first:
+    the stop or the +arm_pct that arms the trail. Both inside one bar = stop (conservative)."""
+    pool = [(o / pc, h / pc, l / pc, c / pc) for (_, _, _, pc), (o, h, l, c) in zip(bars, bars[1:]) if pc > 0]
+    rng, stop, arm, cnt = random.Random(seed), 1 - stop_pct, 1 + arm_pct, {"stop": 0, "arm": 0, "none": 0}
+    for _ in range(replays):
+        p, out = 1.0, "none"
+        for _ in range(horizon):
+            _, h, l, c = rng.choice(pool)
+            if p * l <= stop:
+                out = "stop"; break
+            if p * h >= arm:
+                out = "arm"; break
+            p *= c
+        cnt[out] += 1
+    return {k: round(v / replays, 3) for k, v in cnt.items()}
+
+
 class Risk:
     """Sets the stop BEFORE entry; manages stops/trailing after."""
     def recheck(self, sig, now=None):
@@ -311,10 +350,38 @@ class Risk:
             drop = 1 - px / sig["price"]
             if px <= 0 or drop > CFG["entry_drop_max"]:
                 reasons.append(f"price fell {drop * 100:.1f}% since signal")
+        tm = None
+        if not reasons:
+            bars = bars_1m(fresh[0]["pair"].get("pairAddress"))
+            if not bars or len(bars) < 30:
+                reasons.append("time machine unavailable (too few 1m bars)")
+            else:
+                # costs are paid at entry, so price must fall less than stop_pct to hit the stop
+                cost = slip(CFG["size_pct"] * CFG["start_equity"], f(fresh[0]["pair"].get("liquidity", {}).get("usd")))
+                tm = time_machine(bars, CFG["stop_pct"] - cost, CFG["trail_arm_pct"] + cost, CFG["tm_horizon_min"],
+                                  CFG["tm_replays"], zlib.crc32(sig["mint"].encode()))
+                if tm["stop"] > CFG["tm_stop_first_max"]:
+                    reasons.append(f"time machine: stop first {tm['stop'] * 100:.0f}% of {CFG['tm_replays']:,} replays")
         if reasons:
-            Logger.log("kill", agent="Risk", mint=sig["mint"], symbol=sig.get("symbol"), reasons=reasons)
+            Logger.log("kill", agent="Risk", mint=sig["mint"], symbol=sig.get("symbol"), reasons=reasons, facts={"tm": tm})
             return None
-        return {**sig, "price": px, "liq": f(fresh[0]["pair"].get("liquidity", {}).get("usd"))}
+        Logger.log("timemachine", mint=sig["mint"], symbol=sig.get("symbol"), **tm)
+        return {**sig, "price": px, "liq": f(fresh[0]["pair"].get("liquidity", {}).get("usd")), "tm": tm}
+
+    @staticmethod
+    def limits(st, eq, now=None):
+        """trader-risk's day limits. Returns a reason to block new buys, or None. Selling is never blocked."""
+        day = time.strftime("%Y-%m-%d", time.gmtime(now or time.time()))
+        d = st.get("day") or {}
+        if d.get("date") != day:
+            d = st["day"] = {"date": day, "start_eq": eq, "buys": 0}
+        if eq < d["start_eq"] * (1 - CFG["day_loss_max"]):
+            return f"daily loss limit: {(eq / d['start_eq'] - 1) * 100:.1f}% today"
+        if len(st["pos"]) >= CFG["max_open"]:
+            return f"max {CFG['max_open']} open positions"
+        if d["buys"] >= CFG["max_buys_day"]:
+            return f"max {CFG['max_buys_day']} buys today"
+        return None
 
     def plan(self, sig, equity, cash):
         # size down in thin pools so our own order moves the price by at most impact_max
@@ -324,11 +391,11 @@ class Risk:
             return None
         entry = sig["price"] * (1 + slip(size, sig["liq"]))
         return handoff({"mint": sig["mint"], "symbol": sig.get("symbol"), "usd": size, "entry": entry,
-                        "stop": entry * (1 - CFG["stop_pct"]), "score": sig["score"], "liq": sig["liq"]},
+                        "stop": entry * (1 - CFG["stop_pct"]), "score": sig["score"], "liq": sig["liq"], "tm": sig.get("tm")},
                        ["mint", "usd", "entry", "stop", "liq"], "Risk", "Executor")
 
     @staticmethod
-    def update(pos, price):
+    def update(pos, price, now=None):
         """Return exit reason or None; mutates peak/stop."""
         pos["peak"] = max(pos["peak"], price)
         if pos["peak"] >= pos["entry"] * (1 + CFG["trail_arm_pct"]):
@@ -336,6 +403,8 @@ class Risk:
             pos["trailing"] = True
         if price <= pos["stop"]:
             return "trail_stop" if pos.get("trailing") else "stop_loss"
+        if not pos.get("trailing") and (now or time.time()) - pos.get("opened", now or time.time()) >= CFG["time_exit_h"] * 3600:
+            return "time_exit"  # never reached +12% in time_exit_h: free the cash
         return None
 
 
@@ -350,7 +419,11 @@ class Executor:
         self.st["cash"] -= o["usd"]
         self.st["pos"][o["mint"]] = {**o, "qty": o["usd"] / o["entry"], "peak": o["entry"], "last": o["entry"],
                                      "opened": time.time()}
-        Logger.log("trade", side="buy", **o)
+        self.st.setdefault("day", {}).setdefault("buys", 0)
+        self.st["day"]["buys"] += 1
+        Logger.log("trade", side="buy", **{k: v for k, v in o.items() if k != "tm"})
+        notify(self.st, f"COMPRA {o.get('symbol')} ${o['usd']:,.0f} voto {o['score']}"
+                        + (f" | time machine: stop prima {o['tm']['stop'] * 100:.0f}%" if o.get("tm") else ""))
 
     def sell(self, mint, price, why):
         p = self.st["pos"].pop(mint)
@@ -361,6 +434,7 @@ class Executor:
         Logger.log("trade", side="sell", mint=mint, symbol=p.get("symbol"), reason=why, entry=p["entry"], exit=fill,
                    pnl_usd=round(proceeds - p["usd"], 2), pnl_pct=round((fill / p["entry"] - 1) * 100, 2),
                    cash=round(self.st["cash"], 2))
+        notify(self.st, f"VENDE {p.get('symbol')} {(fill / p['entry'] - 1) * 100:+.1f}% (${proceeds - p['usd']:+,.0f}) {why}")
 
 
 def equity(st):
@@ -368,9 +442,9 @@ def equity(st):
 
 
 def load_state():
-    if os.path.exists(STATE):
-        return json.load(open(STATE))
-    return {"cash": CFG["start_equity"], "pos": {}, "closed": []}
+    st = json.load(open(STATE)) if os.path.exists(STATE) else {"cash": CFG["start_equity"], "pos": {}, "closed": []}
+    st.setdefault("ntfy", "mrtrader-" + secrets.token_hex(8))  # private push topic, shown in the dashboard
+    return st
 
 
 def save_state(st):
@@ -424,6 +498,10 @@ def main(once=False):
                 sig = c and analyst.run(c)
                 if c and not sig:
                     filt.cache[c["mint"]] = time.time()  # low score: rescore after kill_cache_s, not every scan
+                block = sig and Risk.limits(st, equity(st))
+                if block:
+                    Logger.log("kill", agent="Risk", mint=sig["mint"], symbol=sig.get("symbol"), reasons=[block])
+                    sig = None
                 sig = sig and risk.recheck(sig)
                 order = sig and risk.plan(sig, equity(st), st["cash"])
                 if order:

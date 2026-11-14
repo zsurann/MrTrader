@@ -94,20 +94,60 @@ class T(unittest.TestCase):
 
     def test_risk_recheck(self):
         sig = {"mint": "M1", "symbol": "TST", "price": 0.01, "score": 80}
-        orig = desk.get
+        calm_up = {"data": {"attributes": {"ohlcv_list": [[i, 1 + i * .004, 1 + i * .004 + .006, 1 + i * .004 - .001,
+                                                          1 + (i + 1) * .004, 1] for i in range(120)]}}}
+        crash = {"data": {"attributes": {"ohlcv_list": [[i, 1, 1.01, .9, .97, 1] for i in range(120)]}}}
+        state = {"bars": calm_up, "px": "0.0101", "kw": {}}
+        def fake(url, body=None):
+            if "ohlcv" in url: return state["bars"]
+            return [pair(priceUsd=state["px"], **state["kw"])]
+        orig, desk.get = desk.get, fake
+        go = lambda: desk.Risk().recheck(sig, NOW)
         try:
-            desk.get = lambda url, body=None: [pair(priceUsd="0.0101")]
-            with_now = lambda: desk.Risk().recheck(sig, NOW)
-            self.assertAlmostEqual(with_now()["price"], 0.0101)         # fresh price replaces the stale one
-            self.assertEqual(with_now()["liq"], 300_000)
-            desk.get = lambda url, body=None: [pair(priceUsd="0.0090")]
-            self.assertIsNone(with_now())                               # -10% since signal: momentum broke
-            desk.get = lambda url, body=None: [pair(priceChange={"h1": 250})]
-            self.assertIsNone(with_now())                               # pumped past the +80% rule meanwhile
+            r = go()
+            self.assertAlmostEqual(r["price"], 0.0101)                     # fresh price replaces the stale one
+            self.assertEqual(r["liq"], 300_000)
+            self.assertLess(r["tm"]["stop"], 0.5)
+            state["bars"] = crash
+            self.assertIsNone(go())                                         # time machine: stop first too often
+            state["bars"], state["px"] = calm_up, "0.0090"
+            self.assertIsNone(go())                                         # -10% since signal: momentum broke
+            state["px"], state["kw"] = "0.0101", {"priceChange": {"h1": 250}}
+            self.assertIsNone(go())                                         # pumped past the +80% rule meanwhile
+            state["kw"], state["bars"] = {}, None
+            self.assertIsNone(go())                                         # no bars: fail closed
             desk.get = lambda url, body=None: None
-            self.assertIsNone(with_now())
+            self.assertIsNone(go())
         finally:
             desk.get = orig
+
+    def test_time_machine(self):
+        up = [(1.01 ** i,) * 4 for i in range(60)]                       # +1%/min, never dips
+        self.assertEqual(desk.time_machine(up, 0.06, 0.12, 240, 500, 1)["arm"], 1.0)
+        down = [(0.99 ** i,) * 4 for i in range(60)]
+        self.assertEqual(desk.time_machine(down, 0.06, 0.12, 240, 500, 1)["stop"], 1.0)
+        both = [(1, 2, 0.5, 1)] * 10                                          # stop and arm in the same bar
+        self.assertEqual(desk.time_machine(both, 0.06, 0.12, 5, 100, 1)["stop"], 1.0)
+        r = desk.time_machine([(1, 1, 1, 1)] * 10, 0.06, 0.12, 5, 100, 1)   # flat: neither
+        self.assertEqual(r, {"stop": 0.0, "arm": 0.0, "none": 1.0})
+
+    def test_risk_limits(self):
+        st = {"pos": {}, "cash": 10_000}
+        self.assertIsNone(desk.Risk.limits(st, 10_000, NOW))
+        self.assertIn("daily loss", desk.Risk.limits(st, 9_650, NOW))
+        self.assertIsNone(desk.Risk.limits(st, 9_650, NOW + 86_400))          # new day, new baseline
+        st["pos"] = {str(i): {} for i in range(5)}
+        self.assertIn("open positions", desk.Risk.limits(st, 9_650, NOW + 86_400))
+        st["pos"], st["day"]["buys"] = {}, 20
+        self.assertIn("buys today", desk.Risk.limits(st, 9_650, NOW + 86_400))
+
+    def test_time_exit(self):
+        p = {"entry": 1.0, "stop": 0.94, "peak": 1.0, "opened": NOW}
+        self.assertIsNone(desk.Risk.update(p, 1.05, NOW + 3 * 3600))
+        self.assertEqual(desk.Risk.update(p, 1.05, NOW + 4 * 3600), "time_exit")
+        q = {"entry": 1.0, "stop": 0.94, "peak": 1.0, "opened": NOW}
+        desk.Risk.update(q, 1.2, NOW)                                         # trailing: no time exit
+        self.assertIsNone(desk.Risk.update(q, 1.15, NOW + 5 * 3600))
 
     def test_unique_buyers(self):
         c = {**self.cand()[0], "holders": 3000}

@@ -66,6 +66,7 @@ def summary():
     sells = [t for t in tail_jsonl("trade.jsonl", 500) if t.get("side") == "sell"]
     return {
         "running": desk_pid() is not None,
+        "ntfy": st.get("ntfy"), "day": st.get("day"),
         "cash": round(st["cash"], 2),
         "equity": round(st["cash"] + sum(p["qty"] * p["last"] for p in st["pos"].values()), 2),
         "positions": pos,
@@ -92,6 +93,7 @@ h1{font-size:20px;margin:0 0 12px}h2{font-size:15px;margin:0 0 8px;color:var(--m
 .g{color:var(--g)}.r{color:var(--r)}.m{color:var(--mut)}button{font-size:15px;padding:8px 18px;border:0;border-radius:8px;cursor:pointer;margin-right:8px}
 #start{background:var(--g)}#stop{background:var(--r);color:#fff}</style></head><body>
 <h1>MrTrader Desk <span class="m">(soldi finti)</span></h1>
+<div class="card" id="ntfy_card" style="display:none">📱 Notifiche: installa l'app <b>ntfy</b>, premi <b>+</b> e iscriviti al topic <b id="ntfy" style="user-select:all"></b></div>
 <div class="card"><button id="start" onclick="act('start')">▶ Avvia</button><button id="stop" onclick="act('stop')">■ Ferma</button> <b id="run"></b></div>
 <div class="row"><div class="card"><h2>Capitale</h2><div class="big" id="eq"></div></div><div class="card"><h2>Contanti</h2><div class="big" id="cash"></div></div>
 <div class="card"><h2>Vinte / Perse</h2><div class="big" id="wl"></div></div><div class="card"><h2>Posizioni aperte</h2><div class="big" id="np"></div></div></div>
@@ -117,6 +119,7 @@ async function load(){const d=await (await fetch('/api')).json();
 $('run').innerHTML=d.running?'<span class="g">● acceso</span>':'<span class="r">● spento</span>';
 $('eq').innerHTML=usd(d.equity)+' <span class="'+(d.equity>=10000?'g':'r')+'">'+((d.equity/10000-1)*100).toFixed(2)+'%</span>';
 $('nw').textContent=d.wallets.length+d.auto_wallets;$('nauto').textContent=d.auto_wallets;if(!wLoaded){$('wl_in').value=d.wallets.join('\\n');wLoaded=true}
+if(d.ntfy){$('ntfy').textContent=d.ntfy;$('ntfy_card').style.display=''}
 $('cash').textContent=usd(d.cash);$('wl').textContent=d.wins+' / '+d.losses;$('np').textContent=d.positions.length;
 $('pos').innerHTML=tbl(['Moneta','Investito','Entrata','Ora','Stop','P&L'],d.positions.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${usd(p.usd)}</td><td>${p.entry.toPrecision(4)}</td><td>${p.last.toPrecision(4)}</td><td>${p.stop.toPrecision(4)}${p.trailing?' (trail)':''}</td><td class="${p.pnl_pct>=0?'g':'r'}">${p.pnl_pct}%</td></tr>`));
 $('tr').innerHTML=tbl(['Ora','Lato','Moneta','Dettaglio'],d.trades.map(t=>`<tr><td>${hm(t.ts)}</td><td>${t.side=='buy'?'COMPRA':'VENDE'}</td><td>${esc(t.symbol)}</td><td>${t.side=='buy'?'voto '+t.score+', '+usd(t.usd):`<span class="${t.pnl_usd>0?'g':'r'}">${t.pnl_pct}% (${usd(t.pnl_usd)})</span> ${esc(t.reason)}`}</td></tr>`));
