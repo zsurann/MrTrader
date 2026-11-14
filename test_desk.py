@@ -299,6 +299,18 @@ class T(unittest.TestCase):
         self.assertTrue(seen[0][0].startswith(desk.CG) and seen[0][1] == {"x-cg-demo-api-key": "K"})
         self.assertTrue(seen[1][0].startswith(desk.GT))
 
+    def test_cg_daily_budget_falls_back_to_keyless(self):
+        urls = []
+        orig, desk.get = desk.get, lambda url, body=None, headers=None: urls.append(url)
+        key, cap, desk.CG_KEY = desk.CG_KEY, desk.CFG["cg_calls_day"], "K"
+        desk.CFG["cg_calls_day"] = 2; desk._cg_used.clear()
+        try:
+            for _ in range(3): desk.gecko("/pools/P")
+        finally:
+            desk.get, desk.CG_KEY, desk.CFG["cg_calls_day"] = orig, key, cap
+            desk._cg_used.clear()
+        self.assertEqual([u.startswith(desk.CG) for u in urls], [True, True, False])
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")

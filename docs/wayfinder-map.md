@@ -29,6 +29,8 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - Day-trader-skill applied (2026-11-14, user chose all 4 that fit memecoins; scanner/news/analyst/pelosi/broker/entry are US-stock tools, out of scope): (1) Time Machine from trader-timemachine: before entry, 10,000 replays of the next 240 min from the coin's own GeckoTerminal 1m bars (ratio-to-previous-close bars, stop counted first when both in one bar); skip if stop-first > 50%. (2) Risk limits from trader-risk: no new buys after -3% equity in the UTC day, max 5 open, max 20 buys/day; selling never blocked. (3) Phone pushes from trader-alerts via ntfy.sh on every buy/sell, random topic shown in dashboard. (4) Time exit from trader-exit: sell after 4h if trail never armed.
 
+- Free keys live on server (keys.env, gitignored): Helius RPC (smart-wallet checks, 10 rps) and CoinGecko Demo (10k/month). Demo key carries unique-buyers + Time Machine bars up to 320 calls/day, then keyless fallback; freed keyless budget = 4 GeckoTerminal lists per scan instead of 3. Not pursued: Helius-based bundle/early-buyer detection (needs oldest signatures of busy mints = too many credits on free tier); real-time prices (paid streaming).
+
 ## Tickets (frontier)
 - [ ] **Stop width and momentum chasing** `wayfinder:grilling` — -6% sits inside these coins' 1-minute noise, and the score pays most for coins already +40% in 1h. Decide with the outcome table (needs ~100 scored coins). Blocked by: Review results after 2-3 days.
 - [ ] **Review results after 2-3 days** `wayfinder:grilling` — with smart wallets + vol 25k: trade count, win rate, P&L.

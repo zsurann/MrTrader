@@ -15,6 +15,7 @@ CFG = dict(
     tm_replays=10_000, tm_horizon_min=240, tm_stop_first_max=0.5,   # Time Machine gate
     day_loss_max=0.03, max_open=5, max_buys_day=20, time_exit_h=4,   # risk limits, time exit
     start_equity=10_000, scan_every_s=120, tick_s=10, kill_cache_s=1800, gecko_gap_s=6.5,
+    gecko_lists_scan=3, cg_calls_day=320,   # 320/day = the Demo key's 10k/month
 )
 DS, RC = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1"
 DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,7 +32,9 @@ def load_keys(path=os.path.join(DIR, "keys.env")):
 
 load_keys()
 HELIUS = os.environ.get("HELIUS_KEY")
-CG_KEY = os.environ.get("CG_DEMO_KEY")  # CoinGecko Demo: own quota for the Time Machine's 1m bars
+CG_KEY = os.environ.get("CG_DEMO_KEY")  # CoinGecko Demo: own quota for buyers + Time Machine bars
+if CG_KEY:
+    CFG["gecko_lists_scan"] = 4  # keyless pool no longer carries buyers/bars: one more list per scan
 RPC = os.environ.get("SOLANA_RPC") or (f"https://mainnet.helius-rpc.com/?api-key={HELIUS}" if HELIUS
                                        else "https://api.mainnet-beta.solana.com")
 GT = "https://api.geckoterminal.com/api/v2/networks/solana"
@@ -138,11 +141,11 @@ class Scout:
         gecko = [f"trending_pools?duration={d}" for d in ("5m", "1h", "6h", "24h")] + \
                 [f"pools?sort={s}&page={p}" for s in ("h24_volume_usd_desc", "h24_tx_count_desc") for p in (1, 2, 3)]
         # 3 of the 10 lists per scan, in rotation (GCP IP gets 429 at ~9 calls/min); a mint stays a candidate for 30 min
-        for q in [gecko[(self.turn + k) % len(gecko)] for k in range(3)]:
+        for q in [gecko[(self.turn + k) % len(gecko)] for k in range(CFG["gecko_lists_scan"])]:
             tick()
             for m in gecko_mints(get(f"{GT}/{q}")):
                 self.gecko_seen[m] = now
-        self.turn += 3
+        self.turn += CFG["gecko_lists_scan"]
         self.gecko_seen = {m: t for m, t in self.gecko_seen.items() if now - t < 1800}
         mints += [m for m in self.gecko_seen if m not in mints]
         pairs = []
@@ -290,13 +293,26 @@ def smart_holders(mint, wallets):
         accts = ((r or {}).get("result") or {}).get("value") or []
         if any(f(a["account"]["data"]["parsed"]["info"]["tokenAmount"].get("uiAmount")) > 0 for a in accts):
             hits.add(w)
-        time.sleep(0.15)  # public RPC: ~100 req/10s
+        time.sleep(0.12 if HELIUS else 0.15)  # Helius free: 10 req/s; public RPC: ~100 req/10s
     return hits
+
+
+_cg_used = {}  # UTC day -> CoinGecko Demo calls made
+
+
+def gecko(path):
+    """GeckoTerminal data, via the CoinGecko Demo key while today's share of its 10k/month lasts, else keyless.
+    shortcut: the day counter lives in memory, so a restart re-grants the day's budget; persist it if restarts get frequent."""
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    if CG_KEY and _cg_used.get(day, 0) < CFG["cg_calls_day"]:
+        _cg_used[day] = _cg_used.get(day, 0) + 1
+        return get(CG + path, headers={"x-cg-demo-api-key": CG_KEY})
+    return get(GT + path)
 
 
 def unique_buyers(pair_addr):
     """GeckoTerminal: unique buyer wallets in the last hour (DexScreener only has txn counts). None if unknown."""
-    a = ((get(f"{GT}/pools/{pair_addr}") or {}).get("data") or {}).get("attributes") or {}
+    a = ((gecko(f"/pools/{pair_addr}") or {}).get("data") or {}).get("attributes") or {}
     return ((a.get("transactions") or {}).get("h1") or {}).get("buyers")
 
 
@@ -341,9 +357,7 @@ class Analyst:
 def bars_1m(pair_addr, limit=240):
     """1-minute OHLCV, oldest first: [(o, h, l, c), ...]. None if unavailable.
     With a CoinGecko Demo key the call skips the shared keyless GeckoTerminal pool (the 429s)."""
-    q = f"/pools/{pair_addr}/ohlcv/minute?aggregate=1&limit={limit}"
-    resp = get(CG + q, headers={"x-cg-demo-api-key": CG_KEY}) if CG_KEY else get(GT + q)
-    rows = (((resp or {})
+    rows = (((gecko(f"/pools/{pair_addr}/ohlcv/minute?aggregate=1&limit={limit}") or {})
              .get("data") or {}).get("attributes") or {}).get("ohlcv_list")
     return [tuple(f(x) for x in r[1:5]) for r in sorted(rows, key=lambda r: r[0])] if rows else None
 
