@@ -23,14 +23,20 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - First ~6h (2026-11-13): 1 trade, WANTED score 71.9, stopped -8.15% after 4 min (stop slipped past -6%). Top kills: 1h vol 109, liq 82 (mostly dead $0 pairs), score 68, top10 48, rug history 26. Fixes: dead pairs skip RugCheck; price check every 10s. User decision: 1h vol min 50k -> 25k, add smart wallets.
 
+- Night 1 review (2026-11-14): 7 trades, 2W/5L, -2.5%. Two -15% losses were filled and stopped in the same minute = stale signal price; three -8% = -6% stop + 2% costs. Findings + fixes: (1) stops were unwatched during slow scans -> monitor runs between every slow call; (2) Risk rechecks a fresh price/pair right before entry, kills if price fell >3% or rules now fail; (3) paper costs now fee 0.5% + price impact usd/(liq/2), size capped so impact <= 1.5% (thin pool => smaller than 8%); (4) GeckoTerminal paced to ~9 calls/min (keyless limit is 10-30/min, likely source of the 429s).
+- Unique-buyer source: GeckoTerminal pool `transactions.h1.buyers` (unique wallets, free, no key) replaces the buy-txn proxy; 300/h = full marks.
+- Outcome tracking: every scored coin gets one row in logs/outcome.jsonl (score, parts, 1h return, hi, lo); dashboard shows avg 1h return per score band. Tuning weights/stop waits for this data.
+
 ## Tickets (frontier)
+- [ ] **Stop width and momentum chasing** `wayfinder:grilling` — -6% sits inside these coins' 1-minute noise, and the score pays most for coins already +40% in 1h. Decide with the outcome table (needs ~100 scored coins). Blocked by: Review results after 2-3 days.
 - [ ] **Review results after 2-3 days** `wayfinder:grilling` — with smart wallets + vol 25k: trade count, win rate, P&L.
-- [ ] **Unique-buyer source** `wayfinder:research` — DexScreener gives buy-txn count only. Helius/Birdeye (keyed) for true unique buyers?
 
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.
 - [x] **Validate field names on live data** `wayfinder:task` — DexScreener, RugCheck OK on live run 2; GeckoTerminal OK but 429 on bursts (throttled). RugCheck `insider` field confirmed live (run 3). Full pipeline reached Analyst (FOOD scored 55.4).
 
 ## Not yet specified
+- Real bundle detection: Cabal-Hunter (free 250 scans/month, no key), Mobula, MadeOnSol free tier — vendor claims, unverified. Insider % from RugCheck stays until one is tested.
+- Jupiter quote API for exact price impact (needed for live anyway; free lite-api host, v1 marked superseded by Swap V2).
 - Live execution (Jupiter swaps, wallet key handling, priority fees) — after paper results.
 - Gap risk: stops checked every 20s, memecoins can gap through.
 

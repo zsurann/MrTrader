@@ -26,6 +26,18 @@ def reason_kind(r):
     return re.sub(r" [+$]?[\d.,]+%?( |$)", " ", r, count=1).strip()
 
 
+def outcome_table(rows):
+    """Does the score predict the next hour? One line per score band."""
+    out = []
+    for name, lo, hi in (("< 50", 0, 50), ("50-60", 50, 60), ("60-70", 60, 70), ("70+ (compra)", 70, 101)):
+        r = [x for x in rows if lo <= x.get("score", -1) < hi]
+        if r:
+            out.append({"band": name, "n": len(r), "avg": round(100 * sum(x["ret"] for x in r) / len(r), 1),
+                        "up": round(100 * sum(x["ret"] > 0 for x in r) / len(r)),
+                        "hi": round(100 * sum(x["hi"] for x in r) / len(r), 1)})
+    return out
+
+
 def desk_pid():
     try:
         pid = int(open(PID).read())
@@ -63,6 +75,7 @@ def summary():
         "top_reasons": reasons.most_common(8),
         "wins": sum(t["pnl_usd"] > 0 for t in sells), "losses": sum(t["pnl_usd"] <= 0 for t in sells),
         "events": tail_jsonl("events.jsonl", 8)[::-1],
+        "outcomes": outcome_table(tail_jsonl("outcome.jsonl", 5000)),
         "wallets": sorted(load_smart_wallets(auto=False)),
         "auto_wallets": len(load_smart_wallets() - load_smart_wallets(auto=False)),
     }
@@ -84,6 +97,7 @@ h1{font-size:20px;margin:0 0 12px}h2{font-size:15px;margin:0 0 8px;color:var(--m
 <div class="card"><h2>Vinte / Perse</h2><div class="big" id="wl"></div></div><div class="card"><h2>Posizioni aperte</h2><div class="big" id="np"></div></div></div>
 <div class="card"><h2>Posizioni aperte</h2><table id="pos"></table></div>
 <div class="card"><h2>Operazioni</h2><table id="tr"></table></div>
+<div class="card"><h2>Il voto funziona? (prezzo 1 ora dopo il voto)</h2><table id="out"></table></div>
 <div class="card"><h2>Perché scarta (motivi più frequenti)</h2><table id="why"></table></div>
 <div class="card"><h2>Ultimi scarti</h2><table id="kills"></table></div>
 <div class="card"><h2>Smart wallet (<span id="nw">0</span>)</h2>
@@ -106,9 +120,10 @@ $('nw').textContent=d.wallets.length+d.auto_wallets;$('nauto').textContent=d.aut
 $('cash').textContent=usd(d.cash);$('wl').textContent=d.wins+' / '+d.losses;$('np').textContent=d.positions.length;
 $('pos').innerHTML=tbl(['Moneta','Investito','Entrata','Ora','Stop','P&L'],d.positions.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${usd(p.usd)}</td><td>${p.entry.toPrecision(4)}</td><td>${p.last.toPrecision(4)}</td><td>${p.stop.toPrecision(4)}${p.trailing?' (trail)':''}</td><td class="${p.pnl_pct>=0?'g':'r'}">${p.pnl_pct}%</td></tr>`));
 $('tr').innerHTML=tbl(['Ora','Lato','Moneta','Dettaglio'],d.trades.map(t=>`<tr><td>${hm(t.ts)}</td><td>${t.side=='buy'?'COMPRA':'VENDE'}</td><td>${esc(t.symbol)}</td><td>${t.side=='buy'?'voto '+t.score+', '+usd(t.usd):`<span class="${t.pnl_usd>0?'g':'r'}">${t.pnl_pct}% (${usd(t.pnl_usd)})</span> ${esc(t.reason)}`}</td></tr>`));
+$('out').innerHTML=tbl(['Voto','Monete','Media 1h','Salite','Picco medio'],d.outcomes.map(o=>`<tr><td>${esc(o.band)}</td><td>${o.n}</td><td class="${o.avg>=0?'g':'r'}">${o.avg}%</td><td>${o.up}%</td><td>${o.hi}%</td></tr>`));
 $('why').innerHTML=tbl(['Motivo','Volte'],d.top_reasons.map(r=>`<tr><td>${esc(r[0])}</td><td>${r[1]}</td></tr>`));
 $('kills').innerHTML=tbl(['Ora','Agente','Moneta','Motivi'],d.kills.map(k=>`<tr><td>${hm(k.ts)}</td><td>${esc(k.agent)}</td><td>${esc(k.symbol)}</td><td>${esc((k.reasons||[]).join(' · '))}</td></tr>`));
-$('ev').innerHTML=tbl(['Ora','Tipo','Dettaglio'],d.events.map(e=>`<tr><td>${hm(e.ts)}</td><td>${esc(e.kind)}</td><td class="m">${esc(JSON.stringify(e).slice(0,140))}</td></tr>`));}
+$('ev').innerHTML=tbl(['Ora','Tipo','Dettaglio'],d.events.map(e=>`<tr><td>${hm(e.ts)}</td><td>${esc(e.kind)}</td><td class="m">${esc(e.kind=='http_error'?(e.url||'').split('/')[2]+' — '+e.error:JSON.stringify(e).slice(0,140))}</td></tr>`));}
 load();setInterval(load,5000);</script></body></html>"""
 
 

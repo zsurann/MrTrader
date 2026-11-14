@@ -1,4 +1,4 @@
-import os, tempfile, time, unittest
+import json, os, tempfile, time, unittest
 import desk
 
 NOW = 1_800_000_000
@@ -61,12 +61,19 @@ class T(unittest.TestCase):
         self.assertGreaterEqual(sum(a.W[k] * v for k, v in desk.Analyst.score(c, {"W1", "W2", "W3"}).items()), 70)
         weak = {**self.cand(priceChange={"h1": 2, "m5": 0}, txns={"h1": {"buys": 100, "sells": 120}})[0],
                 "holders": 50, "owners": []}
-        self.assertIsNone(a.run(weak))
+        orig, desk.get = desk.get, lambda url, body=None: None           # GeckoTerminal down: falls back to txn count
+        try:
+            a.seen["M1"] = {"p": 0.01, "t": NOW, "w": []}
+            self.assertIsNone(a.run(weak))
+            self.assertLess(a.seen["M1"]["s"], 70)                       # first score kept for outcome tracking
+        finally:
+            desk.get = orig
 
     def test_risk_stop_and_trail(self):
         st = {"cash": 10_000, "pos": {}, "closed": []}
-        o = desk.Risk().plan({"mint": "M1", "price": 1.0, "score": 80}, 10_000, 10_000)
+        o = desk.Risk().plan({"mint": "M1", "price": 1.0, "score": 80, "liq": 1_000_000}, 10_000, 10_000)
         self.assertEqual(o["usd"], 800)
+        self.assertAlmostEqual(o["entry"], 1.0 * (1 + 0.005 + 800 / 500_000))   # fee + price impact
         self.assertAlmostEqual(o["stop"], o["entry"] * 0.94)
         ex = desk.Executor(st); ex.buy(o)
         p = st["pos"]["M1"]
@@ -76,11 +83,62 @@ class T(unittest.TestCase):
         self.assertEqual(desk.Risk.update(p, o["entry"] * 1.12), "trail_stop")
         p2 = {**o, "peak": o["entry"]}
         self.assertEqual(desk.Risk.update(p2, o["entry"] * 0.93), "stop_loss")
+        ex.sell("M1", o["entry"], "test")                              # flat price: lose only costs, both sides
+        self.assertLess(st["cash"], 10_000)
+        self.assertGreater(st["cash"], 10_000 - 800 * 0.02)
+
+    def test_risk_sizes_down_in_thin_pool(self):
+        o = desk.Risk().plan({"mint": "M1", "price": 1.0, "score": 80, "liq": 40_000}, 10_000, 10_000)
+        self.assertAlmostEqual(o["usd"], 300)                           # 1.5% impact cap, not the 8% max
+        self.assertAlmostEqual(o["entry"], 1.02)                        # 0.5% fee + 1.5% impact
+
+    def test_risk_recheck(self):
+        sig = {"mint": "M1", "symbol": "TST", "price": 0.01, "score": 80}
+        orig = desk.get
+        try:
+            desk.get = lambda url, body=None: [pair(priceUsd="0.0101")]
+            with_now = lambda: desk.Risk().recheck(sig, NOW)
+            self.assertAlmostEqual(with_now()["price"], 0.0101)         # fresh price replaces the stale one
+            self.assertEqual(with_now()["liq"], 300_000)
+            desk.get = lambda url, body=None: [pair(priceUsd="0.0090")]
+            self.assertIsNone(with_now())                               # -10% since signal: momentum broke
+            desk.get = lambda url, body=None: [pair(priceChange={"h1": 250})]
+            self.assertIsNone(with_now())                               # pumped past the +80% rule meanwhile
+            desk.get = lambda url, body=None: None
+            self.assertIsNone(with_now())
+        finally:
+            desk.get = orig
+
+    def test_unique_buyers(self):
+        c = {**self.cand()[0], "holders": 3000}
+        self.assertEqual(desk.Analyst.score(c, set(), 150)["buyers"], 0.5)
+        self.assertEqual(desk.Analyst.score(c, set(), None)["buyers"], 1.0)   # fallback: 1500 buy txns
+        orig, desk.get = desk.get, lambda url, body=None: {"data": {"attributes": {"transactions": {"h1": {"buyers": 282}}}}}
+        try:
+            self.assertEqual(desk.unique_buyers("POOL"), 282)
+            desk.get = lambda url, body=None: None
+            self.assertIsNone(desk.unique_buyers("POOL"))
+        finally:
+            desk.get = orig
+
+    def test_outcome_logged_after_1h(self):
+        d = tempfile.mkdtemp(); orig_dir, desk.DIR = desk.DIR, d
+        st = {"seen": {"A": {"p": 1.0, "t": NOW - 3700, "w": [], "s": 72.0, "parts": {"momentum": 1}, "sym": "AAA"},
+                       "B": {"p": 1.0, "t": NOW - 60, "w": [], "s": 40.0, "parts": {}, "sym": "BBB"},
+                       "C": {"p": 1.0, "t": NOW - 3700, "w": []}}}       # never scored: no outcome row
+        orig_get, desk.get = desk.get, lambda url, body=None: [
+            {"baseToken": {"address": m}, "priceUsd": "1.2", "liquidity": {"usd": 1}} for m in "ABC"]
+        try:
+            desk.learn_wallets(st, NOW); desk.learn_wallets(st, NOW)     # second pass must not duplicate
+            rows = [json.loads(l) for l in open(os.path.join(desk.LOGS, "outcome.jsonl"))]
+            self.assertEqual([(r["symbol"], r["score"], r["ret"]) for r in rows], [("AAA", 72.0, 0.2)])
+        finally:
+            desk.get, desk.DIR = orig_get, orig_dir
 
     def test_executor_rejects_oversize(self):
         st = {"cash": 10_000, "pos": {}, "closed": []}
         with self.assertRaises(AssertionError):
-            desk.Executor(st).buy({"mint": "M", "usd": 2000, "entry": 1, "stop": 0.94})
+            desk.Executor(st).buy({"mint": "M", "usd": 2000, "entry": 1, "stop": 0.94, "liq": 1e6})
 
     def test_gecko_mints(self):
         resp = {"data": [{"relationships": {"base_token": {"data": {"id": "solana_ABC"}}}}, {"relationships": {}}]}

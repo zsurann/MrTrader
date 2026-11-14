@@ -2,7 +2,7 @@
 
 Run:  python desk.py            (loops forever, paper mode)
       python desk.py --once     (one cycle)
-Data: DexScreener + GeckoTerminal (pairs/metrics), RugCheck (authorities, LP, holders, insiders).
+Data: DexScreener + GeckoTerminal (pairs/metrics, unique buyers), RugCheck (authorities, LP, holders, insiders).
 """
 import json, os, re, sys, time, urllib.request
 
@@ -11,7 +11,8 @@ CFG = dict(
     liq_min=40_000, vol1h_min=25_000, top10_max=25, dev_max=3, bundle_max=10,
     pump1h_max=80, lp_locked_min=90, score_min=70,
     size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06,
-    slippage=0.01, start_equity=10_000, scan_every_s=120, tick_s=10, kill_cache_s=1800,
+    fee=0.005, impact_max=0.015, entry_drop_max=0.03,
+    start_equity=10_000, scan_every_s=120, tick_s=10, kill_cache_s=1800, gecko_gap_s=6.5,
 )
 DS, RC = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1"
 RPC = os.environ.get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
@@ -54,12 +55,17 @@ def clip(x):
     return max(0.0, min(1.0, x))
 
 
+def slip(usd, liq):
+    """Cost of a market order: fees + constant-product price impact (order vs quote-side reserve = liq/2)."""
+    return CFG["fee"] + usd / max(liq / 2, 1)
+
+
 class Logger:
     @staticmethod
     def log(kind, **data):
         os.makedirs(LOGS, exist_ok=True)
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": kind, **data}
-        with open(os.path.join(LOGS, f"{kind if kind in ('kill', 'trade') else 'events'}.jsonl"), "a") as fh:
+        with open(os.path.join(LOGS, f"{kind if kind in ('kill', 'trade', 'outcome') else 'events'}.jsonl"), "a") as fh:
             fh.write(json.dumps(rec) + "\n")
         if kind != "kill":
             print(json.dumps(rec), flush=True)
@@ -74,7 +80,8 @@ def gecko_mints(resp):
 
 class Scout:
     """Fresh Solana pairs, 30m-72h old, mcap $300k-$20M."""
-    def run(self, now=None):
+    def run(self, now=None, tick=lambda: None):
+        """tick() is called between slow calls so open positions keep being watched during a scan."""
         now = now or time.time()
         mints = []
         for path in ("/token-profiles/latest/v1", "/token-boosts/latest/v1", "/token-boosts/top/v1",
@@ -86,7 +93,8 @@ class Scout:
         gecko = [f"trending_pools?duration={d}" for d in ("5m", "1h", "6h", "24h")] + \
                 [f"pools?sort={s}&page={p}" for s in ("h24_volume_usd_desc", "h24_tx_count_desc") for p in (1, 2, 3)]
         for q in gecko:
-            time.sleep(2.5)  # GeckoTerminal free tier rate-limits bursts (429)
+            tick()
+            time.sleep(CFG["gecko_gap_s"])  # keyless GeckoTerminal: ~10 calls/min before 429s
             for m in gecko_mints(get(f"{GT}/{q}")):
                 if m not in mints:
                     mints.append(m)
@@ -205,8 +213,17 @@ def learn_wallets(st, now=None):
             if f(p.get("liquidity", {}).get("usd")) >= best.get(m, (0, -1))[1]:
                 best[m] = (f(p.get("priceUsd")), f(p.get("liquidity", {}).get("usd")))
         for m, (px, _) in best.items():
-            if m in seen and px >= 2 * seen[m]["p"]:
-                v = seen.pop(m)
+            v = seen.get(m)
+            if not v or px <= 0:
+                continue
+            v["hi"], v["lo"] = max(v.get("hi", v["p"]), px), min(v.get("lo", v["p"]), px)
+            won = px >= 2 * v["p"]
+            if "s" in v and not v.get("o") and (won or now - v["t"] >= 3600):
+                v["o"] = 1  # one outcome row per scored coin: did the score predict the next hour?
+                Logger.log("outcome", mint=m, symbol=v.get("sym"), score=v["s"], parts=v["parts"],
+                           ret=round(px / v["p"] - 1, 3), hi=round(v["hi"] / v["p"] - 1, 3), lo=round(v["lo"] / v["p"] - 1, 3))
+            if won:
+                del seen[m]
                 for w in v["w"]:
                     wins[w] = wins.get(w, 0) + 1
                 Logger.log("learn", mint=m, x=round(px / v["p"], 1), holders=len(v["w"]))
@@ -230,15 +247,27 @@ def smart_holders(mint, wallets):
     return hits
 
 
+def unique_buyers(pair_addr):
+    """GeckoTerminal: unique buyer wallets in the last hour (DexScreener only has txn counts). None if unknown."""
+    a = ((get(f"{GT}/pools/{pair_addr}") or {}).get("data") or {}).get("attributes") or {}
+    return ((a.get("transactions") or {}).get("h1") or {}).get("buyers")
+
+
 class Analyst:
     """0-100 score. Only >= score_min passes."""
     W = dict(momentum=20, buyers=15, buy_sell=20, holder_growth=15, liq_mcap=15, smart=15)
 
+    def __init__(self, seen=None):
+        self.seen = {} if seen is None else seen  # shared with Filter: first score is kept for outcome tracking
+
     def run(self, c):
         smart = load_smart_wallets()  # re-read: list is edited from the dashboard
         hits = (smart & set(c.get("owners") or [])) | (smart_holders(c["mint"], smart) if smart else set())
-        s = self.score(c, hits)
+        s = self.score(c, hits, unique_buyers(c["pair"].get("pairAddress")))
         total = round(sum(self.W[k] * v for k, v in s.items()), 1)
+        v = self.seen.get(c["mint"])
+        if v is not None and "s" not in v:
+            v.update(s=total, parts={k: round(x, 2) for k, x in s.items()}, sym=c.get("symbol"))
         if total < CFG["score_min"]:
             Logger.log("kill", agent="Analyst", mint=c["mint"], symbol=c.get("symbol"),
                        reasons=[f"score {total} < {CFG['score_min']}"], facts=s)
@@ -247,14 +276,14 @@ class Analyst:
         return handoff({**c, "score": total, "price": f(c["pair"].get("priceUsd"))}, ["mint", "score", "price"], "Analyst", "Risk")
 
     @staticmethod
-    def score(c, hits):
+    def score(c, hits, buyers=None):
         p = c["pair"]
         h1, m5 = p.get("txns", {}).get("h1", {}), p.get("priceChange", {})
         buys, sells = f(h1.get("buys")), f(h1.get("sells"))
         return dict(
             momentum=clip(f(m5.get("h1")) / 40) * 0.7 + clip(f(m5.get("m5")) / 10) * 0.3,
-            # shortcut: DexScreener gives buy txn count, not unique buyers; swap for an indexer (Helius/Birdeye) if keyed
-            buyers=clip(buys / 1000),
+            # 300+ unique buyer wallets/h = full marks; buy-txn count only as fallback when GeckoTerminal is down
+            buyers=clip(f(buyers) / 300) if buyers is not None else clip(buys / 1000),
             buy_sell=clip((buys / max(sells, 1) - 1) / 1.0),  # 2:1 buys = full marks
             holder_growth=clip(c["holders"] / max(c["age_h"], 0.5) / 200),  # holders gained per hour since launch
             liq_mcap=clip(f(p.get("liquidity", {}).get("usd")) / max(c["mcap"], 1) / 0.15),
@@ -264,15 +293,31 @@ class Analyst:
 
 class Risk:
     """Sets the stop BEFORE entry; manages stops/trailing after."""
+    def recheck(self, sig, now=None):
+        """The signal is minutes old by now (RugCheck, RPC...): refetch the pair, kill if the picture changed."""
+        fresh = Scout.select(get(f"{DS}/tokens/v1/solana/{sig['mint']}") or [], now or time.time())
+        reasons = ["no fresh price"] if not fresh else \
+            [x for x in Filter.check(fresh[0], None)[0] if x != "rugcheck unavailable"]
+        if fresh:
+            px = f(fresh[0]["pair"].get("priceUsd"))
+            drop = 1 - px / sig["price"]
+            if px <= 0 or drop > CFG["entry_drop_max"]:
+                reasons.append(f"price fell {drop * 100:.1f}% since signal")
+        if reasons:
+            Logger.log("kill", agent="Risk", mint=sig["mint"], symbol=sig.get("symbol"), reasons=reasons)
+            return None
+        return {**sig, "price": px, "liq": f(fresh[0]["pair"].get("liquidity", {}).get("usd"))}
+
     def plan(self, sig, equity, cash):
-        size = min(equity * CFG["size_pct"], cash)
+        # size down in thin pools so our own order moves the price by at most impact_max
+        size = min(equity * CFG["size_pct"], cash, sig["liq"] * CFG["impact_max"] / 2)
         if size < 1:
             Logger.log("kill", agent="Risk", mint=sig["mint"], reasons=["no cash"])
             return None
-        entry = sig["price"] * (1 + CFG["slippage"])
+        entry = sig["price"] * (1 + slip(size, sig["liq"]))
         return handoff({"mint": sig["mint"], "symbol": sig.get("symbol"), "usd": size, "entry": entry,
-                        "stop": entry * (1 - CFG["stop_pct"]), "score": sig["score"]},
-                       ["mint", "usd", "entry", "stop"], "Risk", "Executor")
+                        "stop": entry * (1 - CFG["stop_pct"]), "score": sig["score"], "liq": sig["liq"]},
+                       ["mint", "usd", "entry", "stop", "liq"], "Risk", "Executor")
 
     @staticmethod
     def update(pos, price):
@@ -301,7 +346,7 @@ class Executor:
 
     def sell(self, mint, price, why):
         p = self.st["pos"].pop(mint)
-        fill = price * (1 - CFG["slippage"])
+        fill = price * (1 - slip(p["qty"] * price, p.get("liq") or 1e12))
         proceeds = p["qty"] * fill
         self.st["cash"] += proceeds
         self.st["closed"].append(mint)
@@ -334,9 +379,9 @@ def monitor(st, ex):
             m = p["baseToken"]["address"]
             if f(p.get("liquidity", {}).get("usd")) >= prices.get(m, (0, -1))[1]:
                 prices[m] = (f(p.get("priceUsd")), f(p.get("liquidity", {}).get("usd")))
-        for m, (px, _) in prices.items():
+        for m, (px, liq) in prices.items():
             if m in st["pos"] and px > 0:
-                st["pos"][m]["last"] = px
+                st["pos"][m].update(last=px, liq=liq)
                 why = Risk.update(st["pos"][m], px)
                 if why:
                     ex.sell(m, px, why)
@@ -344,25 +389,34 @@ def monitor(st, ex):
 
 def main(once=False):
     st = load_state()
-    scout, filt, analyst, risk = Scout(), Filter(st.setdefault("seen", {})), Analyst(), Risk()
-    ex, last_scan, last_learn = Executor(st), 0, 0
+    seen = st.setdefault("seen", {})
+    scout, filt, analyst, risk = Scout(), Filter(seen), Analyst(seen), Risk()
+    ex, last_scan, last_learn, last_watch = Executor(st), 0, 0, [0]
+
+    def watch():  # stops must be checked every tick_s even in the middle of a slow scan
+        if time.time() - last_watch[0] >= CFG["tick_s"]:
+            last_watch[0] = time.time()
+            monitor(st, ex)
+
     Logger.log("start", mode="paper", equity=round(equity(st), 2), cfg=CFG)
     while True:
-        monitor(st, ex)
-        if time.time() - last_learn >= 600:
+        watch()
+        if time.time() - last_learn >= 300:
             last_learn = time.time()
             Logger.log("smart_wallets", learned=len(learn_wallets(st)), watching=len(st["seen"]))
         if time.time() - last_scan >= CFG["scan_every_s"]:
             last_scan = time.time()
-            cands = scout.run()
+            cands = scout.run(tick=watch)
             Logger.log("scan", candidates=len(cands))
             for c in cands:
+                watch()
                 if c["mint"] in st["pos"] or c["mint"] in st["closed"]:
                     continue
                 c = filt.run(c)
                 sig = c and analyst.run(c)
                 if c and not sig:
                     filt.cache[c["mint"]] = time.time()  # low score: rescore after kill_cache_s, not every scan
+                sig = sig and risk.recheck(sig)
                 order = sig and risk.plan(sig, equity(st), st["cash"])
                 if order:
                     ex.buy(order)
