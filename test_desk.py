@@ -189,6 +189,36 @@ class T(unittest.TestCase):
         finally:
             desk.get, desk.DIR = orig_get, orig_dir
 
+    def test_scout_rotates_gecko_lists(self):
+        asked = []
+        def fake(url, body=None):
+            asked.append(url)
+            if "geckoterminal" in url:
+                return {"data": [{"relationships": {"base_token": {"data": {"id": f"solana_G{len(asked)}"}}}}]}
+            return [] if "/tokens/v1/" in url else None
+        orig, desk.get, gap = desk.get, fake, desk.CFG["gecko_gap_s"]
+        desk.CFG["gecko_gap_s"] = 0
+        try:
+            sc = desk.Scout(); sc.run(NOW); sc.run(NOW + 120)
+        finally:
+            desk.get, desk.CFG["gecko_gap_s"] = orig, gap
+        g = [u for u in asked if "geckoterminal" in u]
+        self.assertEqual(len(g), 6); self.assertEqual(len(set(g)), 6)        # 3 per scan, different ones
+        self.assertEqual(len(sc.gecko_seen), 6)                              # earlier lists are remembered
+        self.assertEqual(sum(u.count("G") for u in asked if "/tokens/v1/" in u and "G" in u.split("/")[-1]) >= 6, True)
+
+    def test_get_does_not_retry_429(self):
+        import urllib.error, urllib.request
+        calls = []
+        def boom(req, timeout=0):
+            calls.append(1); raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", None, None)
+        orig, urllib.request.urlopen = urllib.request.urlopen, boom
+        try:
+            self.assertIsNone(desk.get("https://x.test/a"))
+        finally:
+            urllib.request.urlopen = orig
+        self.assertEqual(len(calls), 1)
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")

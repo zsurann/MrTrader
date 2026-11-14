@@ -31,6 +31,8 @@ def get(url, body=None):
                 return json.load(r)
         except Exception as e:
             err = e
+            if getattr(e, "code", None) == 429:
+                break  # rate limited: retrying right away only digs the hole deeper
             time.sleep(1 + 2 * i)
     Logger.log("http_error", url=url, error=str(err))
     return None
@@ -80,6 +82,9 @@ def gecko_mints(resp):
 
 class Scout:
     """Fresh Solana pairs, 30m-72h old, mcap $300k-$20M."""
+    def __init__(self):
+        self.turn, self.gecko_seen = 0, {}  # GeckoTerminal mint -> last time listed
+
     def run(self, now=None, tick=lambda: None):
         """tick() is called between slow calls so open positions keep being watched during a scan."""
         now = now or time.time()
@@ -92,12 +97,15 @@ class Scout:
         # new_pools is all <30min old (Scout drops those); busiest + trending pools cover the 30m-72h window
         gecko = [f"trending_pools?duration={d}" for d in ("5m", "1h", "6h", "24h")] + \
                 [f"pools?sort={s}&page={p}" for s in ("h24_volume_usd_desc", "h24_tx_count_desc") for p in (1, 2, 3)]
-        for q in gecko:
+        # 3 of the 10 lists per scan, in rotation (GCP IP gets 429 at ~9 calls/min); a mint stays a candidate for 30 min
+        for q in [gecko[(self.turn + k) % len(gecko)] for k in range(3)]:
             tick()
-            time.sleep(CFG["gecko_gap_s"])  # keyless GeckoTerminal: ~10 calls/min before 429s
+            time.sleep(CFG["gecko_gap_s"])
             for m in gecko_mints(get(f"{GT}/{q}")):
-                if m not in mints:
-                    mints.append(m)
+                self.gecko_seen[m] = now
+        self.turn += 3
+        self.gecko_seen = {m: t for m, t in self.gecko_seen.items() if now - t < 1800}
+        mints += [m for m in self.gecko_seen if m not in mints]
         pairs = []
         for i in range(0, len(mints), 30):
             pairs += get(f"{DS}/tokens/v1/solana/{','.join(mints[i:i + 30])}") or []
