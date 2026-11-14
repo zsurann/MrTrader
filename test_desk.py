@@ -259,6 +259,25 @@ class T(unittest.TestCase):
             urllib.request.urlopen = orig
         self.assertEqual(len(calls), 1)
 
+    def test_gecko_calls_are_paced(self):
+        import urllib.request
+        stamps = []
+        class R:
+            def __enter__(s): return s
+            def __exit__(s, *a): pass
+            def read(s, *a): return b"{}"
+        def fake(req, timeout=0):
+            stamps.append(time.time()); return R()
+        orig, urllib.request.urlopen = urllib.request.urlopen, fake
+        gap, desk.CFG["gecko_gap_s"] = desk.CFG["gecko_gap_s"], 0.2
+        try:
+            for _ in range(3): desk.get(desk.GT + "/x")
+            desk.get("https://api.dexscreener.com/x")                         # other hosts: not paced
+        finally:
+            urllib.request.urlopen, desk.CFG["gecko_gap_s"] = orig, gap
+        self.assertGreaterEqual(stamps[2] - stamps[0], 0.39)
+        self.assertLess(stamps[3] - stamps[2], 0.1)
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")

@@ -23,8 +23,14 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS, STATE = os.path.join(DIR, "logs"), os.path.join(DIR, "state.json")
 
 
+_gt_last = [0.0]
+
+
 def get(url, body=None):
     """GET, or POST JSON when body is given. None on failure (logged)."""
+    if url.startswith(GT):  # one pace for every GeckoTerminal call (lists, buyers, 1m bars): bursts cause the 429s
+        time.sleep(max(0.0, _gt_last[0] + CFG["gecko_gap_s"] - time.time()))
+        _gt_last[0] = time.time()
     for i in range(3):
         try:
             req = urllib.request.Request(url, data=body and json.dumps(body).encode(), headers={
@@ -113,7 +119,6 @@ class Scout:
         # 3 of the 10 lists per scan, in rotation (GCP IP gets 429 at ~9 calls/min); a mint stays a candidate for 30 min
         for q in [gecko[(self.turn + k) % len(gecko)] for k in range(3)]:
             tick()
-            time.sleep(CFG["gecko_gap_s"])
             for m in gecko_mints(get(f"{GT}/{q}")):
                 self.gecko_seen[m] = now
         self.turn += 3
