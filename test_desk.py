@@ -278,6 +278,27 @@ class T(unittest.TestCase):
         self.assertGreaterEqual(stamps[2] - stamps[0], 0.39)
         self.assertLess(stamps[3] - stamps[2], 0.1)
 
+    def test_keys_and_redaction(self):
+        p = os.path.join(tempfile.mkdtemp(), "keys.env")
+        open(p, "w").write("# comment\nZZ_TEST_KEY = abc123\nBROKEN\n")
+        desk.load_keys(p)
+        self.assertEqual(os.environ.pop("ZZ_TEST_KEY"), "abc123")
+        self.assertEqual(desk.redact("https://mainnet.helius-rpc.com/?api-key=SECRET&x=1"),
+                         "https://mainnet.helius-rpc.com/?api-key=***&x=1")
+
+    def test_bars_use_demo_key_when_set(self):
+        seen = []
+        orig, desk.get = desk.get, lambda url, body=None, headers=None: seen.append((url, headers)) or None
+        key, desk.CG_KEY = desk.CG_KEY, "K"
+        try:
+            desk.bars_1m("POOL")
+            desk.CG_KEY = None
+            desk.bars_1m("POOL")
+        finally:
+            desk.get, desk.CG_KEY = orig, key
+        self.assertTrue(seen[0][0].startswith(desk.CG) and seen[0][1] == {"x-cg-demo-api-key": "K"})
+        self.assertTrue(seen[1][0].startswith(desk.GT))
+
     def test_handoff_hard(self):
         with self.assertRaises(ValueError):
             desk.handoff({"mint": "M"}, ["mint", "price"], "Analyst", "Risk")

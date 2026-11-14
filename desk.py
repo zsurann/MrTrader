@@ -17,16 +17,36 @@ CFG = dict(
     start_equity=10_000, scan_every_s=120, tick_s=10, kill_cache_s=1800, gecko_gap_s=6.5,
 )
 DS, RC = "https://api.dexscreener.com", "https://api.rugcheck.xyz/v1"
-RPC = os.environ.get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-GT = "https://api.geckoterminal.com/api/v2/networks/solana"
 DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_keys(path=os.path.join(DIR, "keys.env")):
+    """Free API keys live in keys.env on the server only (gitignored), never in the code or the chat."""
+    if os.path.exists(path):
+        for line in open(path):
+            k, _, v = line.strip().partition("=")
+            if k and v and not k.startswith("#"):
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+load_keys()
+HELIUS = os.environ.get("HELIUS_KEY")
+CG_KEY = os.environ.get("CG_DEMO_KEY")  # CoinGecko Demo: own quota for the Time Machine's 1m bars
+RPC = os.environ.get("SOLANA_RPC") or (f"https://mainnet.helius-rpc.com/?api-key={HELIUS}" if HELIUS
+                                       else "https://api.mainnet-beta.solana.com")
+GT = "https://api.geckoterminal.com/api/v2/networks/solana"
+CG = "https://api.coingecko.com/api/v3/onchain/networks/solana"
 LOGS, STATE = os.path.join(DIR, "logs"), os.path.join(DIR, "state.json")
 
 
 _gt_last = [0.0]
 
 
-def get(url, body=None):
+def redact(url):
+    return re.sub(r"(api-key=)[^&]+", r"\1***", url)
+
+
+def get(url, body=None, headers=None):
     """GET, or POST JSON when body is given. None on failure (logged)."""
     if url.startswith(GT):  # one pace for every GeckoTerminal call (lists, buyers, 1m bars): bursts cause the 429s
         time.sleep(max(0.0, _gt_last[0] + CFG["gecko_gap_s"] - time.time()))
@@ -34,7 +54,8 @@ def get(url, body=None):
     for i in range(3):
         try:
             req = urllib.request.Request(url, data=body and json.dumps(body).encode(), headers={
-                "User-Agent": "paper-desk/1.0", "Accept": "application/json", "Content-Type": "application/json"})
+                "User-Agent": "paper-desk/1.0", "Accept": "application/json", "Content-Type": "application/json",
+                **(headers or {})})
             with urllib.request.urlopen(req, timeout=15) as r:
                 return json.load(r)
         except Exception as e:
@@ -42,7 +63,7 @@ def get(url, body=None):
             if getattr(e, "code", None) == 429:
                 break  # rate limited: retrying right away only digs the hole deeper
             time.sleep(1 + 2 * i)
-    Logger.log("http_error", url=url, error=str(err))
+    Logger.log("http_error", url=redact(url), error=str(err))  # keys must never reach the logs/dashboard
     return None
 
 
@@ -318,8 +339,11 @@ class Analyst:
 
 
 def bars_1m(pair_addr, limit=240):
-    """GeckoTerminal 1-minute OHLCV, oldest first: [(o, h, l, c), ...]. None if unavailable."""
-    rows = (((get(f"{GT}/pools/{pair_addr}/ohlcv/minute?aggregate=1&limit={limit}") or {})
+    """1-minute OHLCV, oldest first: [(o, h, l, c), ...]. None if unavailable.
+    With a CoinGecko Demo key the call skips the shared keyless GeckoTerminal pool (the 429s)."""
+    q = f"/pools/{pair_addr}/ohlcv/minute?aggregate=1&limit={limit}"
+    resp = get(CG + q, headers={"x-cg-demo-api-key": CG_KEY}) if CG_KEY else get(GT + q)
+    rows = (((resp or {})
              .get("data") or {}).get("attributes") or {}).get("ohlcv_list")
     return [tuple(f(x) for x in r[1:5]) for r in sorted(rows, key=lambda r: r[0])] if rows else None
 
@@ -485,7 +509,7 @@ def main(once=False):
             last_watch[0] = time.time()
             monitor(st, ex)
 
-    Logger.log("start", mode="paper", equity=round(equity(st), 2), cfg=CFG)
+    Logger.log("start", mode="paper", helius=bool(HELIUS), coingecko=bool(CG_KEY), equity=round(equity(st), 2), cfg=CFG)
     while True:
         watch()
         if time.time() - last_learn >= 300:

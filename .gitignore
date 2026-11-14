@@ -7,3 +7,4 @@ desk.pid
 desk.out
 smart_wallets_auto.txt
 *.tmp
+keys.env
