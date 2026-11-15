@@ -10,14 +10,15 @@ Tools: `.claude/skills/trader-*/*.py` (stdlib, file handoffs in `trader/`). Safe
 ## Decisions so far
 - Yahoo reachable from the VM (2026-11-15): quote TSLA OK, Time Machine read 59 full sessions of 5m bars. Not checked: the scanner's bulk spark requests (thousands of symbols) under rate limits.
 
+- Account rules (user, 2026-11-15): $10,000 paper, max loss $50/trade (0.5%), daily loss $150, max 3 trades/day, setup = opening-range breakout only (15-min range, stop at range midpoint, target 2R, flat by 15:55 ET).
+- Built stocks.py (decisions taken by agent, user is a beginner): every 10 min 9:50-15:30 ET run `scan.py orb`, take hits that fired in the last 15 min, closest to the range first; news logged (no gate); `exit.py plan`; Time Machine gate avg_R > 0 (expected R incl. flat-by closes); quote -> `size.py` -> `check.py` PASS; paper fill at delayed Yahoo quote via `ticket.py fill`; exits every minute on quote: stop, target, 15:55. Phone pushes on the MrTrader ntfy topic. Dashboard card. systemd unit via deploy/stocks-service.sh. End-to-end test on the skill pack's reel day (TSLA 2026-10-19).
+
 ## Tickets (frontier)
-- [ ] **Account rules** `wayfinder:grilling` — paper budget, max loss per trade, max trades/day, setups (orb only, or daily setups too).
-- [ ] **Paper fill and exit model** `wayfinder:grilling` — fill at next quote + slippage? exits by stop/target/flat-by from alerts.py check every minute. 
+- [ ] **First week review** `wayfinder:grilling` — trades, P&L, Time Machine skips; is avg_R > 0 too loose/tight; does a full-universe scan finish fast enough under Yahoo limits.
 
 ## Not yet specified
-- Time Machine gate threshold for stocks (its verdict, or target-share cutoff).
-- News gate: skip a symbol with earnings/halt news today?
-- Dashboard: same page as MrTrader (second tab) or separate.
+- News gate: skip a symbol with earnings/halt news today? (logged only for now)
+- Scan and exits share one loop: a slow scan delays stop checks.
 
 ## Out of scope
 - Live orders through Alpaca / any broker (paper first, same as MrTrader).

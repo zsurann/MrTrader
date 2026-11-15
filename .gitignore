@@ -8,3 +8,5 @@ desk.out
 smart_wallets_auto.txt
 *.tmp
 keys.env
+stocks/trader/
+stocks/logs/

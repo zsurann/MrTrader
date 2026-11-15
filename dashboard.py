@@ -38,6 +38,27 @@ def outcome_table(rows):
     return out
 
 
+def stocks_summary():
+    """The US stock paper desk (stocks.py): book, open positions, last trades."""
+    base = os.path.join(DIR, "stocks")
+    try:
+        pf = json.load(open(os.path.join(base, "trader", "portfolio.json")))
+    except (OSError, ValueError):
+        pf = {"cash": 10_000, "positions": []}
+    try:
+        st = json.load(open(os.path.join(base, "trader", "desk.json")))
+    except (OSError, ValueError):
+        st = {"pos": {}}
+    rows = []
+    p = os.path.join(base, "logs", "stocks.jsonl")
+    if os.path.exists(p):
+        rows = [r for r in (json.loads(l) for l in open(p).readlines()[-3000:] if l.strip()) if r["kind"] in ("trade", "skip")]
+    sells = [r for r in rows if r["kind"] == "trade" and r["side"] == "sell"]
+    return {"cash": round(pf.get("cash", 0), 2), "pos": st.get("pos") or {},
+            "pnl": round(sum(r["pnl_usd"] for r in sells), 2), "wins": sum(r["pnl_usd"] > 0 for r in sells),
+            "losses": sum(r["pnl_usd"] <= 0 for r in sells), "last": rows[-12:][::-1]}
+
+
 def desk_pid():
     try:
         pid = int(open(PID).read())
@@ -77,6 +98,7 @@ def summary():
         "wins": sum(t["pnl_usd"] > 0 for t in sells), "losses": sum(t["pnl_usd"] <= 0 for t in sells),
         "events": tail_jsonl("events.jsonl", 8)[::-1],
         "outcomes": outcome_table(tail_jsonl("outcome.jsonl", 5000)),
+        "stocks": stocks_summary(),
         "wallets": sorted(load_smart_wallets(auto=False)),
         "auto_wallets": len(load_smart_wallets() - load_smart_wallets(auto=False)),
     }
@@ -102,6 +124,9 @@ h1{font-size:20px;margin:0 0 12px}h2{font-size:15px;margin:0 0 8px;color:var(--m
 <div class="card"><h2>Il voto funziona? (prezzo 1 ora dopo il voto)</h2><table id="out"></table></div>
 <div class="card"><h2>Perché scarta (motivi più frequenti)</h2><table id="why"></table></div>
 <div class="card"><h2>Ultimi scarti</h2><table id="kills"></table></div>
+<div class="card"><h2>🇺🇸 Azioni USA (soldi finti, 15:30-22:00)</h2>
+<div class="row"><div><span class="m">Risultato</span><div class="big" id="s_pnl"></div></div><div><span class="m">Vinte / Perse</span><div class="big" id="s_wl"></div></div><div><span class="m">Contanti</span><div class="big" id="s_cash"></div></div></div>
+<table id="s_pos"></table><table id="s_last"></table></div>
 <div class="card"><h2>Smart wallet (<span id="nw">0</span>)</h2>
 <p class="m">Imparati da solo: <b id="nauto">0</b> (chi teneva monete poi salite 2x, almeno 2 volte). Puoi aggiungerne a mano qui sotto, uno per riga.</p>
 <textarea id="wl_in" rows="6" style="width:100%;box-sizing:border-box;background:#0f1115;color:var(--fg);border:1px solid #333;border-radius:8px;padding:8px;font:12px monospace"></textarea>
@@ -120,6 +145,9 @@ $('run').innerHTML=d.running?'<span class="g">● acceso</span>':'<span class="r
 $('eq').innerHTML=usd(d.equity)+' <span class="'+(d.equity>=10000?'g':'r')+'">'+((d.equity/10000-1)*100).toFixed(2)+'%</span>';
 $('nw').textContent=d.wallets.length+d.auto_wallets;$('nauto').textContent=d.auto_wallets;if(!wLoaded){$('wl_in').value=d.wallets.join('\\n');wLoaded=true}
 if(d.ntfy){$('ntfy').textContent=d.ntfy;$('ntfy_card').style.display=''}
+const S=d.stocks;$('s_pnl').innerHTML=`<span class="${S.pnl>=0?'g':'r'}">${usd(S.pnl)}</span>`;$('s_wl').textContent=S.wins+' / '+S.losses;$('s_cash').textContent=usd(S.cash);
+$('s_pos').innerHTML=tbl(['Aperta','Azioni','Entrata','Stop','Target'],Object.entries(S.pos).map(([k,p])=>`<tr><td>${esc(k)}</td><td>${p.qty}</td><td>${p.entry}</td><td>${p.stop}</td><td>${p.target}</td></tr>`));
+$('s_last').innerHTML=tbl(['Ora','Cosa','Azione','Dettaglio'],S.last.map(r=>`<tr><td>${hm(r.ts)}</td><td>${r.kind=='skip'?'scarta':r.side=='buy'?'COMPRA':'VENDE'}</td><td>${esc(r.symbol)}</td><td>${esc(r.kind=='skip'?r.why:r.side=='buy'?r.qty+' az. a $'+r.price+', stop '+r.stop:(r.pnl_usd>=0?'+':'')+r.pnl_usd+'$ '+r.reason)}</td></tr>`));
 $('cash').textContent=usd(d.cash);$('wl').textContent=d.wins+' / '+d.losses;$('np').textContent=d.positions.length;
 $('pos').innerHTML=tbl(['Moneta','Investito','Entrata','Ora','Stop','P&L'],d.positions.map(p=>`<tr><td>${esc(p.symbol)}</td><td>${usd(p.usd)}</td><td>${p.entry.toPrecision(4)}</td><td>${p.last.toPrecision(4)}</td><td>${p.stop.toPrecision(4)}${p.trailing?' (trail)':''}</td><td class="${p.pnl_pct>=0?'g':'r'}">${p.pnl_pct}%</td></tr>`));
 $('tr').innerHTML=tbl(['Ora','Lato','Moneta','Dettaglio'],d.trades.map(t=>`<tr><td>${hm(t.ts)}</td><td>${t.side=='buy'?'COMPRA':'VENDE'}</td><td>${esc(t.symbol)}</td><td>${t.side=='buy'?'voto '+t.score+', '+usd(t.usd):`<span class="${t.pnl_usd>0?'g':'r'}">${t.pnl_pct}% (${usd(t.pnl_usd)})</span> ${esc(t.reason)}`}</td></tr>`));
