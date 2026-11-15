@@ -14,9 +14,9 @@ Tools: `.claude/skills/trader-*/*.py` (stdlib, file handoffs in `trader/`). Safe
 - Built stocks.py (decisions taken by agent, user is a beginner): every 10 min 9:50-15:30 ET run `scan.py orb`, take hits that fired in the last 15 min, closest to the range first; news logged (no gate); `exit.py plan`; Time Machine gate avg_R > 0 (expected R incl. flat-by closes); quote -> `size.py` -> `check.py` PASS; paper fill at delayed Yahoo quote via `ticket.py fill`; exits every minute on quote: stop, target, 15:55. Phone pushes on the MrTrader ntfy topic. Dashboard card. systemd unit via deploy/stocks-service.sh. End-to-end test on the skill pack's reel day (TSLA 2026-10-19).
 
 - Efficiency 1 (2026-11-15): the scan runs in a background thread; exits keep checking every minute; the lock is held one candidate at a time. Scan logs its duration.
+- Full-universe scan speed (2026-11-15): `scan.py daily` over 5,932 stocks took 2m28s from the VM, no 429 seen. With the background thread and a 10-min cadence that is fine: universe left untrimmed (a liquid-only list would gain ~2 min freshness, not worth a second list to maintain).
 
 ## Tickets (frontier)
-- [ ] **Full-universe scan speed** `wayfinder:task` (HITL) — time `scan.py daily` (same bulk Yahoo fetch as orb) on the VM; if it is minutes, trim the universe to liquid names once a day. Blocks: First week review.
 - [ ] **First week review** `wayfinder:grilling` — trades, P&L, Time Machine skips; is avg_R > 0 too loose/tight; does a full-universe scan finish fast enough under Yahoo limits.
 
 ## Not yet specified
