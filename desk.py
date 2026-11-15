@@ -400,7 +400,8 @@ class Risk:
                 reasons.append("time machine unavailable (too few 1m bars)")
             else:
                 # costs are paid at entry, so price must fall less than stop_pct to hit the stop
-                cost = slip(CFG["size_pct"] * CFG["start_equity"], f(fresh[0]["pair"].get("liquidity", {}).get("usd")))
+                liq = f(fresh[0]["pair"].get("liquidity", {}).get("usd"))
+                cost = slip(min(CFG["size_pct"] * CFG["start_equity"], liq * CFG["impact_max"] / 2), liq)  # same size plan() buys
                 tm = time_machine(bars, CFG["stop_pct"] - cost, CFG["trail_arm_pct"] + cost, CFG["tm_horizon_min"],
                                   CFG["tm_replays"], zlib.crc32(sig["mint"].encode()))
                 if tm["stop"] > CFG["tm_stop_first_max"]:
