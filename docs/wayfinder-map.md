@@ -31,8 +31,10 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - Free keys live on server (keys.env, gitignored): Helius RPC (smart-wallet checks, 10 rps) and CoinGecko Demo (10k/month). Demo key carries unique-buyers + Time Machine bars up to 320 calls/day, then keyless fallback; freed keyless budget = 4 GeckoTerminal lists per scan instead of 3. Not pursued: Helius-based bundle/early-buyer detection (needs oldest signatures of busy mints = too many credits on free tier); real-time prices (paid streaming).
 
+- Stop width (2026-11-15): 24h showed 143 scores, 6 passed 70, all 6 blocked by Time Machine (stop-first 76-85%); after ~2% costs a -6% stop fires on a 4% dip. User chose: stop -12%, trail arms +24% and trails 12%, size 4% (max loss/trade unchanged ~0.5% equity, trader-budget idea). Also fixed: Time Machine cost estimate used $800 instead of the real (impact-capped) size.
+
 ## Tickets (frontier)
-- [ ] **Stop width and momentum chasing** `wayfinder:grilling` — -6% sits inside these coins' 1-minute noise, and the score pays most for coins already +40% in 1h. Decide with the outcome table (needs ~100 scored coins). Blocked by: Review results after 2-3 days.
+- [ ] **Momentum chasing** `wayfinder:grilling` — score pays most for coins already +40% in 1h; decide with the outcome table (~100 scored coins). Blocked by: Review results after 2-3 days.
 - [ ] **Review results after 2-3 days** `wayfinder:grilling` — with smart wallets + vol 25k: trade count, win rate, P&L.
 
 - [ ] **Trail distance** `wayfinder:grilling` — 6% under peak assumed; user only specified arm point.

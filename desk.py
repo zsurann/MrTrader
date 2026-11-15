@@ -10,7 +10,7 @@ CFG = dict(
     age_min_h=0.5, age_max_h=72, mcap_min=300_000, mcap_max=20_000_000,
     liq_min=40_000, vol1h_min=25_000, top10_max=25, dev_max=3, bundle_max=10,
     pump1h_max=80, lp_locked_min=90, score_min=70,
-    size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06,
+    size_pct=0.04, stop_pct=0.12, trail_arm_pct=0.24, trail_pct=0.12,  # wide stop, half size: same max loss
     fee=0.005, impact_max=0.015, entry_drop_max=0.03,
     tm_replays=10_000, tm_horizon_min=240, tm_stop_first_max=0.5,   # Time Machine gate
     day_loss_max=0.03, max_open=5, max_buys_day=20, time_exit_h=4,   # risk limits, time exit

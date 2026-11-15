@@ -20,6 +20,16 @@ RC = {"mintAuthority": None, "freezeAuthority": None, "creator": "DEV", "totalHo
 class T(unittest.TestCase):
     def setUp(self):
         desk.LOGS = tempfile.mkdtemp()
+        self._cfg = dict(desk.CFG)
+
+    def tearDown(self):
+        desk.CFG.clear(); desk.CFG.update(self._cfg)
+
+    def old_risk(self):  # mechanics tests below were written for the original -6% / +12% / 8% plan
+        desk.CFG.update(size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06)
+
+    def test_max_loss_per_trade_unchanged(self):
+        self.assertAlmostEqual(desk.CFG["size_pct"] * desk.CFG["stop_pct"], 0.08 * 0.06)
 
     def cand(self, **kw):
         return desk.Scout.select([pair(**kw)], NOW)
@@ -70,6 +80,7 @@ class T(unittest.TestCase):
             desk.get = orig
 
     def test_risk_stop_and_trail(self):
+        self.old_risk()
         st = {"cash": 10_000, "pos": {}, "closed": []}
         o = desk.Risk().plan({"mint": "M1", "price": 1.0, "score": 80, "liq": 1_000_000}, 10_000, 10_000)
         self.assertEqual(o["usd"], 800)
@@ -93,6 +104,7 @@ class T(unittest.TestCase):
         self.assertAlmostEqual(o["entry"], 1.02)                        # 0.5% fee + 1.5% impact
 
     def test_risk_recheck(self):
+        self.old_risk()
         sig = {"mint": "M1", "symbol": "TST", "price": 0.01, "score": 80}
         calm_up = {"data": {"attributes": {"ohlcv_list": [[i, 1 + i * .004, 1 + i * .004 + .006, 1 + i * .004 - .001,
                                                           1 + (i + 1) * .004, 1] for i in range(120)]}}}
@@ -142,6 +154,7 @@ class T(unittest.TestCase):
         self.assertIn("buys today", desk.Risk.limits(st, 9_650, NOW + 86_400))
 
     def test_time_exit(self):
+        self.old_risk()
         p = {"entry": 1.0, "stop": 0.94, "peak": 1.0, "opened": NOW}
         self.assertIsNone(desk.Risk.update(p, 1.05, NOW + 3 * 3600))
         self.assertEqual(desk.Risk.update(p, 1.05, NOW + 4 * 3600), "time_exit")
