@@ -8,11 +8,11 @@ A second desk, separate from MrTrader, that runs the day-trader-skill pipeline (
 Tools: `.claude/skills/trader-*/*.py` (stdlib, file handoffs in `trader/`). Safety rule kept: no broker, no real orders; paper fills are simulated locally. User is a beginner: guide step by step, Italian.
 
 ## Decisions so far
+- Yahoo reachable from the VM (2026-11-15): quote TSLA OK, Time Machine read 59 full sessions of 5m bars. Not checked: the scanner's bulk spark requests (thousands of symbols) under rate limits.
 
 ## Tickets (frontier)
-- [ ] **Yahoo reachable from the VM** `wayfinder:task` (HITL) — every tool reads Yahoo; datacenter IPs are often refused. Run one quote + one 60-day chart from the VM. Blocks everything below.
 - [ ] **Account rules** `wayfinder:grilling` — paper budget, max loss per trade, max trades/day, setups (orb only, or daily setups too).
-- [ ] **Paper fill and exit model** `wayfinder:grilling` — fill at next quote + slippage? exits by stop/target/flat-by from alerts.py check every minute. Blocked by: Yahoo reachable.
+- [ ] **Paper fill and exit model** `wayfinder:grilling` — fill at next quote + slippage? exits by stop/target/flat-by from alerts.py check every minute. 
 
 ## Not yet specified
 - Time Machine gate threshold for stocks (its verdict, or target-share cutoff).
