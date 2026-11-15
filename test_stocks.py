@@ -42,6 +42,14 @@ class T(unittest.TestCase):
         self.assertEqual(st["pos"], {})
         self.assertEqual(self.trades()[-1]["reason"], "flat_by")
 
+    def test_background_scan_does_not_block_the_cycle(self):
+        st = stocks.load()
+        stocks.cycle(st, "2026-10-19 10:15", background=True)
+        th = stocks._scan[0]
+        self.assertTrue(th is not None)
+        th.join(300)
+        self.assertIn("TSLA", st["pos"])
+
     def test_closed_market_does_nothing(self):
         st = stocks.load()
         stocks.cycle(st, "2026-10-18 10:15")                           # Sunday

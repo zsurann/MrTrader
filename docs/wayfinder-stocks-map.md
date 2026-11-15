@@ -13,12 +13,15 @@ Tools: `.claude/skills/trader-*/*.py` (stdlib, file handoffs in `trader/`). Safe
 - Account rules (user, 2026-11-15): $10,000 paper, max loss $50/trade (0.5%), daily loss $150, max 3 trades/day, setup = opening-range breakout only (15-min range, stop at range midpoint, target 2R, flat by 15:55 ET).
 - Built stocks.py (decisions taken by agent, user is a beginner): every 10 min 9:50-15:30 ET run `scan.py orb`, take hits that fired in the last 15 min, closest to the range first; news logged (no gate); `exit.py plan`; Time Machine gate avg_R > 0 (expected R incl. flat-by closes); quote -> `size.py` -> `check.py` PASS; paper fill at delayed Yahoo quote via `ticket.py fill`; exits every minute on quote: stop, target, 15:55. Phone pushes on the MrTrader ntfy topic. Dashboard card. systemd unit via deploy/stocks-service.sh. End-to-end test on the skill pack's reel day (TSLA 2026-10-19).
 
+- Efficiency 1 (2026-11-15): the scan runs in a background thread; exits keep checking every minute; the lock is held one candidate at a time. Scan logs its duration.
+
 ## Tickets (frontier)
+- [ ] **Full-universe scan speed** `wayfinder:task` (HITL) — time `scan.py daily` (same bulk Yahoo fetch as orb) on the VM; if it is minutes, trim the universe to liquid names once a day. Blocks: First week review.
 - [ ] **First week review** `wayfinder:grilling` — trades, P&L, Time Machine skips; is avg_R > 0 too loose/tight; does a full-universe scan finish fast enough under Yahoo limits.
 
 ## Not yet specified
 - News gate: skip a symbol with earnings/halt news today? (logged only for now)
-- Scan and exits share one loop: a slow scan delays stop checks.
+
 
 ## Out of scope
 - Live orders through Alpaca / any broker (paper first, same as MrTrader).
