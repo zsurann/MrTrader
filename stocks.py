@@ -13,7 +13,7 @@ DIR = os.path.dirname(os.path.abspath(__file__))
 SK = os.path.join(DIR, ".claude", "skills")
 WORK = os.path.join(DIR, "stocks")  # tools read/write trader/* relative to this
 T = os.path.join(WORK, "trader")
-CFG = dict(budget=10_000, max_loss=50, max_trades=3, target="2R", tm_min_avg_r=0.0,
+CFG = dict(budget=10_000, max_loss=50, max_trades=10, target="2R", tm_min_avg_r=-0.05,  # exploration
            scan_every_min=10, fresh_hit_min=15, first_scan="09:50", last_entry="15:30", flat_by="15:55", tick_s=60)
 TOOLS = {"scan": "trader-scanner/scan.py", "news": "trader-news/news.py", "exit": "trader-exit/exit.py",
          "tm": "trader-timemachine/timemachine.py", "size": "trader-budget/size.py", "risk": "trader-risk/check.py",
@@ -62,12 +62,13 @@ def notify(text):
 def load():
     os.makedirs(T, exist_ok=True)
     cfg = os.path.join(T, "config.json")
-    if not os.path.exists(cfg):  # the skill's example config with the user's choices
-        c = json.load(open(os.path.join(SK, "trader-budget", "config.example.json")))
-        c.update(budget=CFG["budget"], max_loss_per_trade_usd=CFG["max_loss"], max_trades_per_day=CFG["max_trades"],
-                 max_daily_loss_usd=3 * CFG["max_loss"], flat_by=CFG["flat_by"], paper=True)
-        c.pop("sec_user_agent", None)
-        json.dump(c, open(cfg, "w"), indent=1)
+    # the skill's example config, re-applied with the desk's limits on every start so CFG changes reach the tools
+    c = json.load(open(cfg if os.path.exists(cfg) else os.path.join(SK, "trader-budget", "config.example.json")))
+    c.update(budget=CFG["budget"], max_loss_per_trade_usd=CFG["max_loss"], max_trades_per_day=CFG["max_trades"],
+             max_orders_per_day=2 * CFG["max_trades"], max_daily_loss_usd=6 * CFG["max_loss"], flat_by=CFG["flat_by"],
+             paper=True)
+    c.pop("sec_user_agent", None)
+    json.dump(c, open(cfg, "w"), indent=1)
     p = os.path.join(T, "desk.json")
     return json.load(open(p)) if os.path.exists(p) else {"date": None, "trades": 0, "done": [], "pos": {}, "last_scan": None}
 

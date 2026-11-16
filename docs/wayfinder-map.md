@@ -33,6 +33,8 @@ Stdlib Python only. Paper first. Ponytail: smallest complete change.
 
 - Stop width (2026-11-15): 24h showed 143 scores, 6 passed 70, all 6 blocked by Time Machine (stop-first 76-85%); after ~2% costs a -6% stop fires on a 4% dip. User chose: stop -12%, trail arms +24% and trails 12%, size 4% (max loss/trade unchanged ~0.5% equity, trader-budget idea). Also fixed: Time Machine cost estimate used $800 instead of the real (impact-capped) size.
 
+- Exploration mode (2026-11-16, user: "make it trade a lot"). Evidence: 36 scored coins, no score band has a positive 1h mean (70+: -32%, n=5); one rug (Busted, score 78.4) went -91% in 2 min through a -12% stop. More trades with this edge = faster losses, but in paper = faster data. Changes: score_min 55, Time Machine stop-first cap 0.65, size 2% (a rug costs <=2%), max 10 open / 50 buys a day, daily loss 5%.
+
 ## Tickets (frontier)
 - [ ] **Momentum chasing** `wayfinder:grilling` — score pays most for coins already +40% in 1h; decide with the outcome table (~100 scored coins). Blocked by: Review results after 2-3 days.
 - [ ] **Review results after 2-3 days** `wayfinder:grilling` — with smart wallets + vol 25k: trade count, win rate, P&L.

@@ -16,6 +16,8 @@ Tools: `.claude/skills/trader-*/*.py` (stdlib, file handoffs in `trader/`). Safe
 - Efficiency 1 (2026-11-15): the scan runs in a background thread; exits keep checking every minute; the lock is held one candidate at a time. Scan logs its duration.
 - Full-universe scan speed (2026-11-15): `scan.py daily` over 5,932 stocks took 2m28s from the VM, no 429 seen. With the background thread and a 10-min cadence that is fine: universe left untrimmed (a liquid-only list would gain ~2 min freshness, not worth a second list to maintain).
 
+- Exploration mode (2026-11-16, day 1: 2 trades, 2 small stop losses, most hits skipped by the Time Machine): max 10 trades/day, Time Machine gate avg_R > -0.05, daily loss $300; config.json re-applied on every start.
+
 ## Tickets (frontier)
 - [ ] **First week review** `wayfinder:grilling` — trades, P&L, Time Machine skips; is avg_R > 0 too loose/tight; does a full-universe scan finish fast enough under Yahoo limits.
 

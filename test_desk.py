@@ -28,8 +28,8 @@ class T(unittest.TestCase):
     def old_risk(self):  # mechanics tests below were written for the original -6% / +12% / 8% plan
         desk.CFG.update(size_pct=0.08, stop_pct=0.06, trail_arm_pct=0.12, trail_pct=0.06)
 
-    def test_max_loss_per_trade_unchanged(self):
-        self.assertAlmostEqual(desk.CFG["size_pct"] * desk.CFG["stop_pct"], 0.08 * 0.06)
+    def test_max_loss_per_trade_not_above_original(self):
+        self.assertLessEqual(desk.CFG["size_pct"] * desk.CFG["stop_pct"], 0.08 * 0.06 + 1e-9)
 
     def cand(self, **kw):
         return desk.Scout.select([pair(**kw)], NOW)
@@ -99,6 +99,7 @@ class T(unittest.TestCase):
         self.assertGreater(st["cash"], 10_000 - 800 * 0.02)
 
     def test_risk_sizes_down_in_thin_pool(self):
+        self.old_risk()
         o = desk.Risk().plan({"mint": "M1", "price": 1.0, "score": 80, "liq": 40_000}, 10_000, 10_000)
         self.assertAlmostEqual(o["usd"], 300)                           # 1.5% impact cap, not the 8% max
         self.assertAlmostEqual(o["entry"], 1.02)                        # 0.5% fee + 1.5% impact
@@ -144,14 +145,15 @@ class T(unittest.TestCase):
         self.assertEqual(r, {"stop": 0.0, "arm": 0.0, "none": 1.0})
 
     def test_risk_limits(self):
-        st = {"pos": {}, "cash": 10_000}
+        st, c = {"pos": {}, "cash": 10_000}, desk.CFG
+        low = 10_000 * (1 - c["day_loss_max"] - 0.005)
         self.assertIsNone(desk.Risk.limits(st, 10_000, NOW))
-        self.assertIn("daily loss", desk.Risk.limits(st, 9_650, NOW))
-        self.assertIsNone(desk.Risk.limits(st, 9_650, NOW + 86_400))          # new day, new baseline
-        st["pos"] = {str(i): {} for i in range(5)}
-        self.assertIn("open positions", desk.Risk.limits(st, 9_650, NOW + 86_400))
-        st["pos"], st["day"]["buys"] = {}, 20
-        self.assertIn("buys today", desk.Risk.limits(st, 9_650, NOW + 86_400))
+        self.assertIn("daily loss", desk.Risk.limits(st, low, NOW))
+        self.assertIsNone(desk.Risk.limits(st, low, NOW + 86_400))           # new day, new baseline
+        st["pos"] = {str(i): {} for i in range(c["max_open"])}
+        self.assertIn("open positions", desk.Risk.limits(st, low, NOW + 86_400))
+        st["pos"], st["day"]["buys"] = {}, c["max_buys_day"]
+        self.assertIn("buys today", desk.Risk.limits(st, low, NOW + 86_400))
 
     def test_time_exit(self):
         self.old_risk()
