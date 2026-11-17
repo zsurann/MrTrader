@@ -219,6 +219,30 @@ class Syncer:
                                            px_vs_live_ref_pct=c.get("px_vs_live_ref_pct")) for c in fs[-8:]])
         except Exception:
             rule_ws = None
+        # v5: new shadow candidates (entry gates + exit variants) and the Helius smart-factor source check
+        try:
+            v5 = {}
+            for r in ("organic_50", "churn_50", "m5_chase_10", "top1_10"):
+                g = [json.loads(d) | dict(position_id=pid) for pid, d in q("SELECT position_id,data FROM shadow_events WHERE rule=? AND kind='ENTRY_GATE'", (r,))]
+                ent = [x for x in g if x.get("entered") and x.get("position_id")]
+                cl = [x for x in ent if pnl.get(x["position_id"], (None, ""))[1] == "CLOSED"]
+                v5[r] = dict(passes=len(g), would_block=sum(1 for x in g if x.get("would_block") is True), entries=len(ent),
+                             closed=len(cl), actual_pnl_usd=round(sum(pnl[x["position_id"]][0] or 0 for x in cl), 2),
+                             shadow_pnl_usd=round(sum(pnl[x["position_id"]][0] or 0 for x in cl if x.get("would_block") is not True), 2))
+            for r in ("time_stop_60m", "breakeven_8"):
+                c_ = [json.loads(d) for (d,) in q("SELECT data FROM shadow_events WHERE rule=? AND kind='COMPARE'", (r,))]
+                v5[r] = dict(compared=len(c_), triggered=sum(1 for x in c_ if x.get("triggered")),
+                             actual_pnl_usd=round(sum(x.get("actual_pnl_usd") or 0 for x in c_), 2),
+                             shadow_pnl_usd=round(sum(x.get("shadow_pnl_usd") or 0 for x in c_), 2))
+            sc = [json.loads(d) for (d,) in q("SELECT data FROM shadow_events WHERE rule='smart_src' AND kind='COMPARE'")]
+            try: hs = (q("SELECT credits,lookups,fallbacks FROM helius_smart_usage WHERE day=?", (time.strftime("%Y-%m-%d"),)) or [[0, 0, 0]])[0]
+            except sqlite3.OperationalError: hs = (0, 0, 0)
+            v5["smart_src"] = dict(compared=len(sc), agree=sum(1 for x in sc if x.get("agree")),
+                                   only_helius=sum(x.get("only_helius") or 0 for x in sc), only_gt=sum(x.get("only_gt") or 0 for x in sc),
+                                   credits_today=hs[0], lookups_today=hs[1], gt_fallbacks_today=hs[2])
+            rule_v5 = v5
+        except Exception:
+            rule_v5 = None
         # Jupiter quoted vs modeled slippage (paper fills)
         fq = [json.loads(d) | dict(symbol=sy) for sy, d in q("SELECT symbol,data FROM events WHERE kind='FILL_QUOTE' ORDER BY id DESC LIMIT 10")]
         fills = [dict(symbol=f["symbol"], side=f.get("side"), modeled=f.get("modeled_slip_pct"), quoted=f.get("quoted_slip_pct"),
@@ -226,7 +250,7 @@ class Syncer:
         try: hel = (q("SELECT calls FROM helius_usage WHERE day=?", (time.strftime("%Y-%m-%d"),)) or [[0]])[0][0]
         except sqlite3.OperationalError: hel = 0
         payload = dict(top=top, winners=winners, factors=factors, rule_a=rule_a, rule_b=rule_b, rule_skeptic=rule_s,
-                       rule_ptp=rule_p, rule_trail4=rule_t4, rule_combo=rule_c, rule_ws=rule_ws, fills=fills, helius_calls_today=hel, min_list_for_factor=10)
+                       rule_ptp=rule_p, rule_trail4=rule_t4, rule_combo=rule_c, rule_ws=rule_ws, rule_v5=rule_v5, fills=fills, helius_calls_today=hel, min_list_for_factor=10)
         return dict(id=1, updated_at=ts(time.time()), list_size=size, tracked=tracked, tokens_done=tok.get("done", 0),
                     tokens_skipped=tok.get("too_busy", 0) + tok.get("too_busy_deep", 0) + tok.get("error", 0), blacklisted=bl, payload=payload)
 

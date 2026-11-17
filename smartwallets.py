@@ -4,7 +4,8 @@ MemeDesk smart-wallet list + shadow rules. PAPER ONLY: reads public on-chain/mar
 
 Two halves:
   * SmartBook  (imported by desk.py, runs inside the Analyst): counts how many tracked smart wallets bought a
-    candidate recently (GeckoTerminal trades, which carry the trader address) -> Analyst `smart_wallets` factor.
+    candidate in the last 6h -> Analyst `smart_wallets` factor. v5: read from Helius (each smart wallet's own token
+    account history, ~13 credits and <1 s per lookup); GeckoTerminal /trades is only the fallback.
   * Builder    (`python3 smartwallets.py`, its own supervised process): builds/refreshes the smart-wallet list in
     the background and runs the shadow exit rule. Heavy RPC work never touches the desk's ~20s cycle.
 
@@ -46,6 +47,8 @@ SW = dict(
     # Helius Free (1M credits/month, 10 RPS): only for deep signature paging past the public-RPC cap and as a fallback.
     # Budget counted conservatively at 10 credits/call (Helius docs list 1-10 for archival methods).
     helius_daily_calls=2400, helius_credits_per_call=10, helius_max_pages_per_token=240,
+    # v5: Analyst smart factor from Helius (getSignaturesForAddress + getTransaction = 1 credit each, Helius credits page).
+    helius_smart=True, helius_smart_daily_credits=15000, smart_compare_every=4,
 )
 FACTOR_MAP = {0: 0.0, 1: 45.0, 2: 75.0}   # 3+ -> 100
 PTP = dict(frac=0.40, tp_pct=0.15)          # shadow partial take-profit: 40% at +15%, 60% rides the real exit
@@ -78,6 +81,62 @@ def pump_curve(mint):
 
 def factor_value(n): return FACTOR_MAP.get(n, 100.0)
 
+# ---- v5: smart-wallet buys via Helius on the wallets' own token accounts (replaces the GT /trades bottleneck)
+TOKEN_PROGRAMS = ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+ATA_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+STABLES = ("EPjFWdu5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB")
+_ata_cache = {}
+def ata(owner, mint, prog):
+    k = (owner, mint, prog)
+    if k not in _ata_cache: _ata_cache[k] = pda([b58d(owner), b58d(prog), b58d(mint)], ATA_PROGRAM)
+    return _ata_cache[k]
+def wallet_buy_usd(tx, wallet, mint, sol_usd, token_px=None):
+    """-> (USD the wallet spent buying `mint` in one tx, tokens received); (None, 0) if its balance did not grow."""
+    meta = tx.get("meta") or {}
+    if meta.get("err"): return None, 0.0
+    def bal(arr, m):
+        return sum(float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0) for b in arr or []
+                   if b.get("mint") == m and b.get("owner") == wallet)
+    got = bal(meta.get("postTokenBalances"), mint) - bal(meta.get("preTokenBalances"), mint)
+    if got <= 0: return None, 0.0
+    keys = [k["pubkey"] if isinstance(k, dict) else k for k in tx["transaction"]["message"]["accountKeys"]]
+    sol = 0.0
+    if wallet in keys:
+        i = keys.index(wallet); sol = max(0.0, (meta["preBalances"][i] - meta["postBalances"][i]) / 1e9)
+    sol += max(0.0, bal(meta.get("preTokenBalances"), SOL_MINT) - bal(meta.get("postTokenBalances"), SOL_MINT))
+    usd = sum(max(0.0, bal(meta.get("preTokenBalances"), m) - bal(meta.get("postTokenBalances"), m)) for m in STABLES)
+    paid = sol * (sol_usd or 0) + usd
+    if token_px: paid = max(paid, got * token_px)   # paid with another token / by a relayer: value the tokens received
+    return paid, got
+def helius_smart_buys(rpc_batch, url, wallets, mint, token_prog, window_s, min_usd, sol_usd, token_px=None,
+                      sig_limit=100, chunk=6, max_tx=18):
+    """-> (buys {wallet: dict(ts, usd, sig)} or None on RPC failure, credits used). Same question as the GT lookup
+    ("which tracked wallets bought this token >= min_usd in the window"), answered from each wallet's own associated
+    token account history, so it covers the whole window and every pool instead of GT's last 300 pool trades."""
+    wallets = sorted(wallets); atas = [ata(w, mint, token_prog) for w in wallets]
+    sigs = rpc_batch(url, [("getSignaturesForAddress", [a, {"limit": sig_limit, "commitment": "confirmed"}]) for a in atas])
+    credits = len(atas)
+    if not sigs or all(r is None for r in sigs): return None, credits
+    cutoff = now() - window_s
+    pend = {w: [(x["signature"], x.get("blockTime")) for x in (r or [])
+                if x.get("err") is None and (x.get("blockTime") or 0) >= cutoff][:max_tx] for w, r in zip(wallets, sigs)}
+    buys = {}
+    while True:   # newest first, a few txs per wallet per round, stop a wallet at its first qualifying buy
+        todo = []
+        for w, lst in pend.items():
+            if w in buys: continue
+            todo += [(w, s_, ts) for s_, ts in lst[:chunk]]; pend[w] = lst[chunk:]
+        if not todo: break
+        txs = rpc_batch(url, [("getTransaction", [s_, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1,
+                                                       "commitment": "confirmed"}]) for _, s_, _ in todo])
+        credits += len(todo)
+        for (w, s_, ts), tx in zip(todo, txs):
+            if not tx or w in buys: continue
+            try: usd, got = wallet_buy_usd(tx, w, mint, sol_usd, token_px)
+            except Exception: usd, got = None, 0.0
+            if usd is not None and usd >= min_usd: buys[w] = dict(ts=ts, usd=round(usd, 2), sig=s_, price=(usd / got if got else 0.0))
+    return buys, credits
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS smart_wallets(address TEXT PRIMARY KEY, score REAL, wins INT, losses INT, seen INT,
     is_smart INT DEFAULT 0, bot INT, first_seen REAL, last_seen REAL, tokens TEXT, updated REAL);
@@ -92,6 +151,7 @@ CREATE TABLE IF NOT EXISTS shadow_events(id INTEGER PRIMARY KEY, ts REAL, ts_iso
     mint TEXT, symbol TEXT, position_id INT, data TEXT);
 CREATE INDEX IF NOT EXISTS shadow_pos ON shadow_events(position_id, kind);
 CREATE TABLE IF NOT EXISTS helius_usage(day TEXT PRIMARY KEY, calls INT, purpose TEXT);
+CREATE TABLE IF NOT EXISTS helius_smart_usage(day TEXT PRIMARY KEY, credits INT, lookups INT, fallbacks INT);
 CREATE INDEX IF NOT EXISTS sw_entries_wallet ON sw_entries(wallet);
 CREATE INDEX IF NOT EXISTS smart_wallets_smart ON smart_wallets(is_smart);
 """
@@ -170,35 +230,93 @@ class SmartBook:
         self.db, self.lock = db, lock
         with lock: ensure_schema(db)
         self._set, self._ts = set(), 0.0
+        self.rpc = self.url = self.wait = None   # set by the desk: (HTTP.rpc_batch, Helius URL, wait_not_critical)
+        self._prog, self._n = {}, 0
     def smart_set(self):
         if now() - self._ts > 60:
             with self.lock:
                 self._set = {r[0] for r in self.db.execute("SELECT address FROM smart_wallets WHERE is_smart=1")}
             self._ts = now()
         return self._set
-    def factor(self, get, mint, pair):
-        """-> (value 0..100 or None if unavailable, info). None never penalises: the Analyst renormalises."""
-        S = self.smart_set()
-        if len(S) < SW["min_list_for_factor"]:
-            return None, dict(status=f"smart list too small ({len(S)} < {SW['min_list_for_factor']}): factor skipped, weights renormalised", list_size=len(S))
-        try: tr = gt_trades(get, pair, SW["lookup_min_usd"])
-        except Exception as e: tr = None; err = repr(e)
-        if tr is None:
-            return None, dict(status="trades lookup failed: factor skipped, weights renormalised", list_size=len(S))
+    def _credits_today(self):
+        with self.lock:
+            r = self.db.execute("SELECT credits FROM helius_smart_usage WHERE day=?", (time.strftime("%Y-%m-%d"),)).fetchone()
+        return r[0] if r else 0
+    def _note(self, credits, fallback=False):
+        try:
+            with self.lock:
+                self.db.execute("INSERT INTO helius_smart_usage(day,credits,lookups,fallbacks) VALUES(?,?,1,?) ON CONFLICT(day) DO "
+                                "UPDATE SET credits=credits+?, lookups=lookups+1, fallbacks=fallbacks+?",
+                                (time.strftime("%Y-%m-%d"), credits, int(fallback), credits, int(fallback)))
+        except Exception: pass
+    def _token_prog(self, mint):
+        if mint not in self._prog:
+            r = self.rpc(self.url, [("getAccountInfo", [mint, {"encoding": "base64", "dataSlice": {"offset": 0, "length": 0}}])])
+            owner = (((r or [None])[0] or {}).get("value") or {}).get("owner")
+            if owner not in TOKEN_PROGRAMS: return None, 1
+            self._prog[mint] = owner
+            return owner, 1
+        return self._prog[mint], 0
+    def _helius(self, get, S, mint, price):
+        """-> (buys, credits) or (None, credits) when unavailable (no key, budget spent, RPC failure)."""
+        if not (SW["helius_smart"] and self.rpc and self.url): return None, 0
+        if self._credits_today() >= SW["helius_smart_daily_credits"]: return None, 0
+        prog, cr = self._token_prog(mint)
+        if not prog: return None, cr
+        try:
+            d = get(f"https://lite-api.jup.ag/price/v3?ids={SOL_MINT}", cache_s=600) or {}
+            sol = float((d.get(SOL_MINT) or {}).get("usdPrice") or 0) or None
+        except Exception: sol = None
+        buys, c2 = helius_smart_buys(self.rpc, self.url, S, mint, prog, SW["lookup_window_h"] * 3600, SW["lookup_min_usd"],
+                                     sol, float(price or 0) or None)
+        return buys, cr + c2
+    def _gt(self, get, S, pair):
+        tr = gt_trades(get, pair, SW["lookup_min_usd"])
+        if tr is None: return None, None
         cutoff = now() - SW["lookup_window_h"] * 3600
         buys = {}
         for t in tr:
             if t["kind"] == "buy" and (t["ts"] or 0) >= cutoff and t["wallet"] in S:
                 buys.setdefault(t["wallet"], t)
+        tss = [t["ts"] for t in tr if t["ts"]]
+        return buys, dict(trades_scanned=len(tr), trades_span_min=(round((max(tss) - min(tss)) / 60, 1) if tss else None))
+    def _compare(self, get, S, mint, pair, hb):
+        """SHADOW check of the Helius source against GT on the same smart list (off the critical path, log only)."""
+        try:
+            if self.wait: self.wait()
+            gb, gi = self._gt(get, S, pair)
+            if gb is None: return
+            h, g = set(hb), set(gb)
+            shadow_event(self.db, self.lock, None, "smart_src", "COMPARE", mint, None, None, helius=sorted(h), gt=sorted(g),
+                         agree=(h == g), only_helius=len(h - g), only_gt=len(g - h), gt_span_min=(gi or {}).get("trades_span_min"))
+        except Exception: pass
+    def factor(self, get, mint, pair, price=None):
+        """-> (value 0..100 or None if unavailable, info). None never penalises: the Analyst renormalises.
+        v5: Helius (wallets' own token-account history, whole 6h window) first; GeckoTerminal /trades as fallback."""
+        S = self.smart_set()
+        if len(S) < SW["min_list_for_factor"]:
+            return None, dict(status=f"smart list too small ({len(S)} < {SW['min_list_for_factor']}): factor skipped, weights renormalised", list_size=len(S))
+        t0 = now(); extra = {}
+        try: buys, credits = self._helius(get, S, mint, price)
+        except Exception: buys, credits = None, 0
+        if buys is not None:
+            src = "helius token-account history >$50, 6h"
+            self._note(credits); self._n += 1
+            if SW["smart_compare_every"] and self._n % SW["smart_compare_every"] == 0:
+                threading.Thread(target=self._compare, args=(get, S, mint, pair, dict(buys)), daemon=True).start()
+        else:
+            if credits: self._note(credits, fallback=True)
+            try: buys, extra = self._gt(get, S, pair)
+            except Exception: buys = None
+            src = "geckoterminal trades >$50 (fallback)"
+            if buys is None:
+                return None, dict(status="trades lookup failed: factor skipped, weights renormalised", list_size=len(S))
         n = len(buys)
         with self.lock:
             for w, t in buys.items():
-                self.db.execute("INSERT OR IGNORE INTO sw_obs(mint,wallet,ts,price,src) VALUES(?,?,?,?,?)", (mint, w, t["ts"], t["price"], "analyst"))
-        span_min = None
-        tss = [t["ts"] for t in tr if t["ts"]]
-        if tss: span_min = round((max(tss) - min(tss)) / 60, 1)
-        return factor_value(n), dict(status="ok", count=n, wallets=sorted(buys)[:10], list_size=len(S),
-                                     trades_scanned=len(tr), trades_span_min=span_min, src="geckoterminal trades >$50")
+                self.db.execute("INSERT OR IGNORE INTO sw_obs(mint,wallet,ts,price,src) VALUES(?,?,?,?,?)", (mint, w, t["ts"], t.get("price") or 0, "analyst"))
+        return factor_value(n), dict(status="ok", count=n, wallets=sorted(buys)[:10], list_size=len(S), src=src,
+                                     secs=round(now() - t0, 2), credits=credits, **(extra or {}))
 
 # ---------------------------------------------------------------- background builder process
 class Builder:

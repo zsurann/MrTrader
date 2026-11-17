@@ -95,6 +95,17 @@ Solo paper, con OK esplicito. Le regole non cambiano (stop −6%, trailing da +1
 - Nuova chiave Jupiter: valida, ma stessa finestra per IP (5 richieste ogni ~10 s), quindi il limite resta a 2,05 s. Jupiter non ha un equivalente di GeckoTerminal `/trades`, quindi non può alleggerire GeckoTerminal.
 - Rollback: rimettere `desk.py`, `wsmini.py` e `syncer.py` della versione precedente, oppure `helius_ws_live=False` (il feed resta solo shadow).
 
+## Audit e fattore smart wallet su Helius (v5, 2026-11-17)
+
+Solo paper. Le regole live non cambiano.
+
+- Audit: tutti i componenti erano attivi e funzionanti (feed Helius, poll_stop/fast_stop, pp_discovery, fattore smart, regole shadow, chiave Jupiter, limiti e cache, keepalive, watchdog, monitor, Telegram, dashboard). Nessun guasto silenzioso. Nota: Helius conta `getSignaturesForAddress` e `getTransaction` a 1 credito, non 10.
+- Il fattore `smart_wallets` dell'Analyst non usa più GeckoTerminal `/trades` (ultimi 300 trade del pool, spesso solo 7–60 minuti delle 6 ore previste, circa 5 chiamate al minuto per IP). Ora, per ogni smart wallet, legge da Helius la storia del suo token account per quel token e cerca un acquisto ≥ $50 nelle ultime 6 ore. Stessa domanda, finestra completa, tutti i pool. Circa 12–22 crediti e 0,2–2 s per controllo, tetto 15.000 crediti al giorno, GeckoTerminal resta come riserva. Un controllo su quattro viene confrontato con GeckoTerminal fuori dal percorso critico (`smart_src`).
+- Validazione su pool reali: 48 acquirenti su 55 trovati (87%) nel caso che conta (chi compra riceve i token). Il 57% degli "acquirenti" di GeckoTerminal sono relayer o bot. Sulla lista smart reale: 8 pool su 10 identici; nei 2 diversi Helius vede un acquisto fuori dalla finestra di GeckoTerminal e GeckoTerminal conta un arbitraggio senza acquisto netto.
+- Risultato: ciclo medio da 47,1 s a circa 18 s, Filter/Analyst da 36,8 s a circa 1,4 s.
+- Nuove regole shadow (solo log): ingresso `organic_50`, `churn_50`, `m5_chase_10`, `top1_10`; uscita `time_stop_60m`, `breakeven_8`. La dashboard riceve i dati in `rule_v5` (interfaccia invariata).
+- Rollback: rimettere i file della versione precedente, oppure `SW["helius_smart"]=False`.
+
 ## Servizi disattivati sulla VM Oracle (si possono riaccendere)
 
 - `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`

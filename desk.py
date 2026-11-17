@@ -57,6 +57,9 @@ CFG = dict(
 )
 # Shadow-only exit variants. Log only: never read by live Executor/Risk. Do not put these in CFG.
 SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the live trail, then 4% under the peak (live uses 6%)
+# v5 shadow-only candidates from the best-practice review (log only, never read by live code).
+SHADOW_ENTRY_V5 = dict(organic_50=50.0, churn_50=0.5, churn_max_age_h=24.0, m5_chase_10=10.0, top1_10=10.0)
+SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03), breakeven_8=dict(arm=0.08, lock_gain=0.01))
 
 UA = {"User-Agent": "memedesk-paper/1.0", "Accept": "application/json"}
 BURN_ADDRS = {"1nc1nerator11111111111111111111111111111111", "11111111111111111111111111111111"}
@@ -834,6 +837,7 @@ class Filter:
             real = [h for h in holders if h.get("address") not in excl and h.get("owner") not in excl]
             top10 = sum(float(h.get("pct") or 0) for h in real[:10])
             checks["top10_pct_ex_pools"] = round(top10, 2); checks["holders_excluded_as_pool_or_burn"] = len(holders) - len(real)
+            checks["top1_pct_ex_pools"] = round(max((float(h.get("pct") or 0) for h in real), default=0.0), 2)   # v5: logged for shadow rules only
             if top10 > CFG["max_top10_pct"]: reasons.append(f"top-10 holders {top10:.1f}% > 25%")
         # --- dev/creator holdings + past rugs
         creator = rc.get("creator")
@@ -888,7 +892,10 @@ class Filter:
 # ---------------------------------------------------------------- Analyst (stage 3)
 def clamp(x, a=0.0, b=100.0): return max(a, min(b, x))
 class Analyst:
-    def __init__(self, log: Logger): self.log = log; self.smart = SWL.SmartBook(log.db, log.lock)
+    def __init__(self, log: Logger):
+        self.log = log; self.smart = SWL.SmartBook(log.db, log.lock)
+        self.smart.url = helius_rpc_url(); self.smart.wait = wait_not_critical   # v5: Helius smart-wallet lookups
+        self.smart.rpc = lambda url, calls: HTTP.rpc_batch(url, calls, tries=2, priority=True, batch_size=10)
     def run(self, fp: FilterPass) -> Optional[AnalystPass]:
         assert isinstance(fp, FilterPass)
         c = fp.cand; pc = c.price_change; tx = c.txns
@@ -938,7 +945,7 @@ class Analyst:
         comp["liq_mcap"] = clamp(500 * lm); notes["liq_mcap"] = round(lm, 4)
         # smart wallets: distinct tracked smart wallets (free on-chain list, see smartwallets.py) that bought recently
         # 0 -> 0, 1 -> 45, 2 -> 75, 3+ -> 100. Lookup failure / list too small -> None -> renormalised (never penalises)
-        try: sv, sinfo = self.smart.factor(lambda u, **kw: HTTP.get(u, tries=2, priority=True, **kw), c.mint, c.pair_address)
+        try: sv, sinfo = self.smart.factor(lambda u, **kw: HTTP.get(u, tries=2, priority=True, **kw), c.mint, c.pair_address, c.price_usd)
         except Exception as e: sv, sinfo = None, dict(status=f"error {e!r}: factor skipped, weights renormalised")
         comp["smart_wallets"] = sv; notes["smart_wallets"] = sinfo
         W = CFG["weights"]; tw = sum(w for k, w in W.items() if comp.get(k) is not None and w > 0)
@@ -1007,6 +1014,7 @@ class Risk:
         self.log = log
         self._shadow_booted = False
         self._t4w = self._t4x = self._t4c = set()
+        self._v5 = {r: dict(w=set(), x=set(), c=set()) for r in SHADOW_EXIT_V5}; self._opened = {}
         self._cw = self._cp = self._cx = self._cc = set()
         self._plocks, self._plocks_lock = {}, threading.Lock()
         self._last_write, self._src_state, self._pollb, self._post, self._ws_seen = {}, {}, {}, {}, {}
@@ -1051,6 +1059,8 @@ class Risk:
         self._t4w, self._t4x, self._t4c = self._shadow_ids("trail_4pct", "WATCH"), self._shadow_ids("trail_4pct", "SHADOW_EXIT"), self._shadow_ids("trail_4pct", "COMPARE")
         self._cw, self._cp, self._cx, self._cc = (self._shadow_ids("combo_tp_trail4", "WATCH"), self._shadow_ids("combo_tp_trail4", "PARTIAL"),
                                                   self._shadow_ids("combo_tp_trail4", "SHADOW_EXIT"), self._shadow_ids("combo_tp_trail4", "COMPARE"))
+        self._v5 = {r: dict(w=self._shadow_ids(r, "WATCH"), x=self._shadow_ids(r, "SHADOW_EXIT"), c=self._shadow_ids(r, "COMPARE"))
+                    for r in SHADOW_EXIT_V5}
         self._shadow_booted = True
 
     def _shadow_fill_payload(self, ref, exit_px, src, model_px, q, qty):
@@ -1062,6 +1072,8 @@ class Risk:
     def shadow_open_tick(self, pid, mint, sym, ep, qty, size, px, liq, peak, reuse=None):
         """Track shadow stops for one open position on every Risk poll. Writes WATCH / PARTIAL / SHADOW_EXIT only."""
         if not ep or not qty or not px: return
+        try: self.shadow_v5_tick(pid, mint, sym, ep, qty, size, px, liq, peak, reuse)
+        except Exception as e: self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, rule="v5_tick", error=repr(e))
         act_lvl = ep * (1 + SHADOW_TRAIL4["activate"])
         trail_on = peak >= act_lvl
         shadow_stop = peak * (1 - SHADOW_TRAIL4["dist"]) if trail_on else None
@@ -1102,8 +1114,47 @@ class Risk:
                       **self._shadow_fill_payload(px, exit_px, src, model_px, q, rq))
             self._cx.add(pid)
 
+    def _opened_ts(self, pid):
+        if pid not in self._opened:
+            with self.log.lock:
+                r = self.log.db.execute("SELECT opened_ts FROM positions WHERE id=?", (pid,)).fetchone()
+            self._opened[pid] = r[0] if r else now()
+        return self._opened[pid]
+    def shadow_v5_tick(self, pid, mint, sym, ep, qty, size, px, liq, peak, reuse=None):
+        """v5 SHADOW exits (log only): time stop after 60 min without +3%, breakeven (+1%) once the peak passed +8%."""
+        for rule, prm in SHADOW_EXIT_V5.items():
+            st = self._v5[rule]
+            if pid not in st["w"]:
+                self._sev(rule, "WATCH", mint, sym, pid, entry_price=ep, peak=peak, **prm); st["w"].add(pid)
+            if pid in st["x"]: continue
+            if rule == "time_stop_60m":
+                age_min = (now() - self._opened_ts(pid)) / 60
+                hit = age_min >= prm["minutes"] and px < ep * (1 + prm["min_gain"]); why = dict(age_min=round(age_min, 1))
+            else:
+                hit = peak >= ep * (1 + prm["arm"]) and px <= ep * (1 + prm["lock_gain"]); why = dict(peak_gain_pct=round(100 * (peak / ep - 1), 2))
+            if hit:
+                exit_px, src, model_px, q = paper_sell_fill(mint, qty, px, liq, reuse)
+                pnl = exit_px * qty - size
+                self._sev(rule, "SHADOW_EXIT", mint, sym, pid, entry_price=ep, peak=peak, size_usd=size, hyp_pnl_usd=round(pnl, 2),
+                          hyp_pnl_pct=round(100 * pnl / size, 2) if size else None, **why,
+                          **self._shadow_fill_payload(px, exit_px, src, model_px, q, qty))
+                st["x"].add(pid)
+    def shadow_v5_close(self, pid, mint, sym, actual_pnl, actual_pct, reason, exit_px):
+        for rule in SHADOW_EXIT_V5:
+            st = self._v5[rule]
+            if pid not in st["w"] or pid in st["c"]: continue
+            hyp = self._shadow_row(rule, "SHADOW_EXIT", pid)
+            self._sev(rule, "COMPARE", mint, sym, pid, triggered=bool(hyp),
+                      actual_pnl_usd=round(actual_pnl or 0, 2), actual_pnl_pct=round(actual_pct or 0, 2), actual_reason=reason,
+                      actual_exit_price=exit_px,
+                      shadow_pnl_usd=(hyp or {}).get("hyp_pnl_usd", round(actual_pnl or 0, 2)),
+                      shadow_pnl_pct=(hyp or {}).get("hyp_pnl_pct", round(actual_pct or 0, 2)),
+                      shadow_exit_iso=(hyp or {}).get("_ts_iso"), shadow_exit_price=(hyp or {}).get("exit_price"))
+            st["c"].add(pid)
     def shadow_compare_close(self, pid, mint, sym, qty, size, actual_pnl, actual_pct, reason, exit_px):
         """Once the live paper position closes, record actual vs shadow PnL for trail_4pct and the combo variant."""
+        try: self.shadow_v5_close(pid, mint, sym, actual_pnl, actual_pct, reason, exit_px)
+        except Exception as e: self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, rule="v5_close", error=repr(e))
         if pid not in self._t4c:
             hyp = self._shadow_row("trail_4pct", "SHADOW_EXIT", pid)
             if hyp:
@@ -1145,7 +1196,8 @@ class Risk:
             rows = self.log.db.execute(
                 "SELECT id,mint,symbol,qty,size_usd,pnl_usd,pnl_pct,exit_reason,exit_price FROM positions WHERE status='CLOSED'").fetchall()
         for pid, mint, sym, qty, size, pnl, pct, reason, xp in rows:
-            if (pid in self._t4w and pid not in self._t4c) or (pid in self._cw and pid not in self._cc):
+            if (pid in self._t4w and pid not in self._t4c) or (pid in self._cw and pid not in self._cc) or \
+               any(pid in st["w"] and pid not in st["c"] for st in self._v5.values()):
                 self.shadow_compare_close(pid, mint, sym, qty, size, pnl, pct, reason, xp)
 
     # ---- v4: live exit evaluation shared by the 30 s DexScreener poll and the Helius real-time feed.
@@ -1684,6 +1736,20 @@ class Desk:
                              cycle=self.log.cycle, score=ap.score, smart_count=n, smart_factor=ap.components.get("smart_wallets"),
                              would_block=(None if n is None else n < 2), entered=bool(order),
                              note=None if n is not None else "smart data unavailable -> rule undecidable")
+            inp = ap.components.get("_inputs") or {}; E = SHADOW_ENTRY_V5
+            org = inp.get("jupiter_organic_score"); v24 = (c.vol or {}).get("h24"); m5 = (c.price_change or {}).get("m5")
+            churn = (float(v24) / c.mcap) if (v24 is not None and c.mcap) else None
+            top1 = (ap.fp.checks or {}).get("top1_pct_ex_pools")
+            gates = dict(
+                organic_50=(org, None if org is None else org < E["organic_50"], f"Jupiter organic score < {E['organic_50']:.0f} (wash/bot volume)"),
+                churn_50=(None if churn is None else round(churn, 3),
+                          None if churn is None else (c.age_h <= E["churn_max_age_h"] and churn < E["churn_50"]),
+                          f"young coin (<= {E['churn_max_age_h']:.0f}h) with 24h volume < {E['churn_50']:.0%} of mcap (supply not changing hands)"),
+                m5_chase_10=(m5, None if m5 is None else m5 > E["m5_chase_10"], f"buying after > +{E['m5_chase_10']:.0f}% in 5 min (chasing)"),
+                top1_10=(top1, None if top1 is None else top1 > E["top1_10"], f"largest non-pool holder > {E['top1_10']:.0f}%"))
+            for rule, (val, blk, why) in gates.items():
+                SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, rule, "ENTRY_GATE", c.mint, c.symbol, pid,
+                                 cycle=self.log.cycle, score=ap.score, value=val, would_block=blk, entered=bool(order), rule_text=why)
             cyc = self.log.cycle
             def _sk():   # v3: shadow 'Skeptic' checklist (GT OHLCV) runs off the cycle's critical path; log only
                 try:
