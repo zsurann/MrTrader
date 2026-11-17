@@ -199,6 +199,26 @@ class Syncer:
                       shadow_pnl_usd=round(sum(c.get("shadow_pnl_usd") or 0 for c in cb), 2),
                       rows=[dict(symbol=c["symbol"], actual=c.get("actual_pnl_usd"), shadow=c.get("shadow_pnl_usd"),
                                  triggered=bool(c.get("tp_hit") or c.get("trail_hit"))) for c in cb[-8:]])
+        # v4: Helius real-time exit trigger (live) vs the old DexScreener poll (shadow 'poll_stop')
+        try:
+            ex = [json.loads(d) | dict(symbol=sy) for sy, d in q("SELECT symbol,data FROM events WHERE stage='Risk' AND kind='EXIT' ORDER BY id DESC LIMIT 40")]
+            src = [json.loads(d) for (d,) in q("SELECT data FROM events WHERE stage='Risk' AND kind='PRICE_SOURCE' AND ts>?", (time.time() - 86400,))]
+            pc = [json.loads(d) | dict(symbol=sy) for sy, d in q("SELECT symbol,data FROM shadow_events WHERE rule='poll_stop' AND kind='COMPARE' ORDER BY id")]
+            fs = [json.loads(d) | dict(symbol=sy) for sy, d in q("SELECT symbol,data FROM shadow_events WHERE rule='fast_stop' AND kind='COMPARE' ORDER BY id")]
+            try: cr = (q("SELECT credits_est FROM helius_ws_usage WHERE day=?", (time.strftime("%Y-%m-%d"),)) or [[0]])[0][0]
+            except sqlite3.OperationalError: cr = 0
+            rule_ws = dict(exits_ws=sum(1 for e in ex if e.get("trigger_src") == "helius_ws"),
+                           exits_poll=sum(1 for e in ex if e.get("trigger_src") == "dexscreener_poll"),
+                           fallbacks_24h=sum(1 for e in src if e.get("source") == "dexscreener_poll" and e.get("previous") == "helius_ws"),
+                           poll_compared=len(pc), credits_today=cr,
+                           rows=[dict(symbol=c["symbol"], poll_seconds_later=c.get("poll_seconds_later"),
+                                      poll_px_vs_live_pct=c.get("poll_px_vs_live_trigger_pct")) for c in pc[-8:]],
+                           exits=[dict(symbol=e["symbol"], src=e.get("trigger_src"), pnl_pct=e.get("pnl_pct"),
+                                       fill_vs_trigger_pct=e.get("fill_vs_trigger_pct")) for e in ex[:8]],
+                           fast_stop=[dict(symbol=c["symbol"], seconds_earlier=c.get("seconds_earlier"),
+                                           px_vs_live_ref_pct=c.get("px_vs_live_ref_pct")) for c in fs[-8:]])
+        except Exception:
+            rule_ws = None
         # Jupiter quoted vs modeled slippage (paper fills)
         fq = [json.loads(d) | dict(symbol=sy) for sy, d in q("SELECT symbol,data FROM events WHERE kind='FILL_QUOTE' ORDER BY id DESC LIMIT 10")]
         fills = [dict(symbol=f["symbol"], side=f.get("side"), modeled=f.get("modeled_slip_pct"), quoted=f.get("quoted_slip_pct"),
@@ -206,7 +226,7 @@ class Syncer:
         try: hel = (q("SELECT calls FROM helius_usage WHERE day=?", (time.strftime("%Y-%m-%d"),)) or [[0]])[0][0]
         except sqlite3.OperationalError: hel = 0
         payload = dict(top=top, winners=winners, factors=factors, rule_a=rule_a, rule_b=rule_b, rule_skeptic=rule_s,
-                       rule_ptp=rule_p, rule_trail4=rule_t4, rule_combo=rule_c, fills=fills, helius_calls_today=hel, min_list_for_factor=10)
+                       rule_ptp=rule_p, rule_trail4=rule_t4, rule_combo=rule_c, rule_ws=rule_ws, fills=fills, helius_calls_today=hel, min_list_for_factor=10)
         return dict(id=1, updated_at=ts(time.time()), list_size=size, tracked=tracked, tokens_done=tok.get("done", 0),
                     tokens_skipped=tok.get("too_busy", 0) + tok.get("too_busy_deep", 0) + tok.get("error", 0), blacklisted=bl, payload=payload)
 

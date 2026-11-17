@@ -80,6 +80,21 @@ Prime prove shadow: `bul` (posizione 5) — `fast_stop` ha visto lo stop toccato
 
 Rollback: rimettere `desk.py` e `smartwallets.py` della versione precedente e riavviare `memedesk`.
 
+## Uscite in tempo reale con Helius (v4, 2026-11-17)
+
+Solo paper, con OK esplicito. Le regole non cambiano (stop −6%, trailing da +12% con distanza 6%). Cambia solo da dove arriva il prezzo per le uscite e quanto è veloce.
+
+- `HeliusFeed` (thread `helius-ws`): un solo WebSocket Helius standard, `accountSubscribe` sui due vault del pool di ogni posizione aperta. Pool supportati: PumpSwap, Raydium CPMM, Raydium AMM v4 (vault e mint verificati on-chain). CLMM, DLMM e Orca restano sul polling.
+- Prezzo = riserva quote / riserva base × prezzo USD della quote (SOL da DexScreener).
+- Il thread `ws-risk` valuta ogni 0,25 s quando arriva un prezzo nuovo e ricontrolla ogni 2 s. Stessa logica delle regole del polling.
+- Si torna da solo al polling DexScreener (evento `PRICE_SOURCE` a ogni cambio) se: WS scollegato, nessun dato da più di 15 s, pool non supportato, differenza >3% al controllo ogni 60 s, budget crediti superato (6000/giorno stimati), nessun prezzo di riferimento fresco, oppure prezzo dalle riserve lontano più dell'8% da DexScreener/Jupiter.
+- Shadow `poll_stop`: la vecchia uscita a polling continua a girare solo nei log. Gli eventi EXIT salvano `trigger_src`, `trigger_px` e `fill_vs_trigger_pct`.
+- Crediti: tabella `helius_ws_usage` ed evento `WS_STATUS` ogni 10 minuti. Stima: circa 1,4k crediti al giorno per posizione aperta tutto il giorno (controllo ogni 60 s) più 1–5k per un pool molto attivo, solo mentre la posizione è aperta. Senza posizioni: circa 1 credito. Piano gratuito: 1M al mese.
+- Prova isolata: BAWSAQ con −9% rispetto a DexScreener → ritorno al polling come previsto; CATE → uscita da helius_ws, prezzo di uscita −0,116% rispetto al trigger.
+- Dopo il deploy (14:33–15:01): ciclo medio 55,9 s, 0 risposte 429 da Jupiter, nessun traceback, WS collegato, Telegram ok. Nessuna posizione aperta in quella finestra.
+- Nuova chiave Jupiter: valida, ma stessa finestra per IP (5 richieste ogni ~10 s), quindi il limite resta a 2,05 s. Jupiter non ha un equivalente di GeckoTerminal `/trades`, quindi non può alleggerire GeckoTerminal.
+- Rollback: rimettere `desk.py`, `wsmini.py` e `syncer.py` della versione precedente, oppure `helius_ws_live=False` (il feed resta solo shadow).
+
 ## Servizi disattivati sulla VM Oracle (si possono riaccendere)
 
 - `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`

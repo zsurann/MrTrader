@@ -8,7 +8,7 @@ Pipeline (hard, typed handoffs):
         -> Executor -> PaperOrder -> Risk (manages PaperPosition) -> Logger
 Every stage reports to Logger; a coin only advances via the typed record of the previous stage.
 """
-import json, math, os, sqlite3, sys, threading, time, traceback, random, http.client, ssl, urllib.parse, hashlib, fcntl
+import json, math, os, sqlite3, sys, threading, time, traceback, random, http.client, ssl, urllib.parse, hashlib, fcntl, base64, struct, re
 from concurrent.futures import ThreadPoolExecutor
 import urllib.request, urllib.error
 from dataclasses import dataclass, asdict
@@ -52,6 +52,8 @@ CFG = dict(
     # v3 (no effect on rules): background Jupiter list refresher, shadow fast-stop watcher, PumpPortal shadow discovery
     fast_stop_poll_s=10,     # SHADOW ONLY: Jupiter price/v3 poll of open positions (log only, never closes a trade)
     pumpportal_ws=True,      # SHADOW ONLY: free PumpPortal migration stream, logged and measured, NOT added to Scout
+    # v4 (user-approved): Helius reserve prices are the LIVE exit trigger when healthy; same rule levels.
+    helius_ws_live=True, ws_max_dev_pct=8.0, ws_silent_s=15, helius_ws_daily_credits=6000, ws_poll_post_watch_s=300,
 )
 # Shadow-only exit variants. Log only: never read by live Executor/Risk. Do not put these in CFG.
 SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the live trail, then 4% under the peak (live uses 6%)
@@ -1006,6 +1008,9 @@ class Risk:
         self._shadow_booted = False
         self._t4w = self._t4x = self._t4c = set()
         self._cw = self._cp = self._cx = self._cc = set()
+        self._plocks, self._plocks_lock = {}, threading.Lock()
+        self._last_write, self._src_state, self._pollb, self._post, self._ws_seen = {}, {}, {}, {}, {}
+        self.feed = None
 
     def open(self, o: PaperOrder):
         assert isinstance(o, PaperOrder) and o.stop_price < o.fill_price
@@ -1143,6 +1148,104 @@ class Risk:
             if (pid in self._t4w and pid not in self._t4c) or (pid in self._cw and pid not in self._cc):
                 self.shadow_compare_close(pid, mint, sym, qty, size, pnl, pct, reason, xp)
 
+    # ---- v4: live exit evaluation shared by the 30 s DexScreener poll and the Helius real-time feed.
+    # Rule levels are unchanged (stop -6%, trail activates at +12%, 6% under the peak). Only the price
+    # source / timing differs: Helius pool reserves when the feed is healthy, else the DexScreener poll.
+    def _plock(self, pid):
+        with self._plocks_lock: return self._plocks.setdefault(pid, threading.Lock())
+    def _open_row(self, pid):
+        with self.log.lock:
+            return self.log.db.execute("SELECT id,mint,symbol,pair,entry_price,qty,size_usd,stop_price,peak_price,trail_active,initial_stop "
+                                       "FROM positions WHERE id=? AND status='OPEN'", (pid,)).fetchone()
+    def apply_price(self, pid, px, liq, src, trig=None):
+        """Evaluate the live rules for one OPEN position at price `px` from `src`. Returns True if it closed it."""
+        with self._plock(pid):
+            r = self._open_row(pid)
+            if not r or not px: return False
+            pid, mint, sym, pair, ep, qty, size, stop, peak, trail, istop = r
+            new_peak = max(peak, px)
+            new_trail = bool(trail) or new_peak >= ep * (1 + CFG["trail_activate"])
+            new_stop = stop
+            if new_trail: new_stop = max(stop, new_peak * (1 - CFG["trail_dist"]))
+            if new_trail and not trail:
+                self.log.event("Risk", "TRAIL_ACTIVATED", mint, sym, peak=new_peak, entry=ep, stop=new_stop, price_src=src)
+            if px <= new_stop:
+                # live fill first (unchanged model), then shadow can reuse it when the size matches
+                exit_px, fill_src, model_px, q = paper_sell_fill(mint, qty, px, liq)
+                live_reuse = dict(ref=px, qty=qty, exit_px=exit_px, src=fill_src, model_px=model_px, q=q)
+                self.log.event("Risk", "FILL_QUOTE", mint, sym, side="sell", qty=qty, ref_price=px,
+                               modeled_slip_pct=round(100 * (1 - model_px / px), 3),
+                               quoted_slip_pct=(round(100 * (1 - q["price"] / px), 3) if q else None),
+                               jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
+                proceeds = exit_px * qty; pnl = proceeds - size
+                reason = "trailing stop" if new_trail else "stop-loss -6%"
+                with self.log.lock:
+                    db = self.log.db; db.execute("BEGIN IMMEDIATE")
+                    try:   # same all-or-nothing pattern as Risk.open: a failed write must never leave the shared connection mid-transaction
+                        db.execute("""UPDATE positions SET status='CLOSED',last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=?,
+                            closed_ts=?,closed_iso=?,exit_ref=?,exit_price=?,exit_reason=?,pnl_usd=?,pnl_pct=? WHERE id=? AND status='OPEN'""",
+                            (px, now(), new_peak, new_stop, int(new_trail), now(), iso(), px, exit_px, reason, pnl, 100 * pnl / size, pid))
+                        db.execute("UPDATE ledger SET v=v+? WHERE k='cash'", (proceeds,)); db.execute("COMMIT")
+                    except Exception:
+                        db.execute("ROLLBACK"); raise
+                self.log.event("Risk", "EXIT", mint, sym, reason=reason, ref_price=px, exit_price=exit_px, entry=ep,
+                               pnl_usd=round(pnl, 2), pnl_pct=round(100 * pnl / size, 2), peak=new_peak, stop=new_stop,
+                               trigger_src=src, trigger_px=px, fill_vs_trigger_pct=round(100 * (exit_px / px - 1), 3),
+                               trigger_vs_stop_pct=round(100 * (px / new_stop - 1), 3), **(trig or {}))
+                self._post[pid] = dict(mint=mint, sym=sym, pair=pair, stop=new_stop, exit_ts=now(), exit_ref=px, exit_px=exit_px,
+                                       src=src, until=now() + (CFG.get("ws_poll_post_watch_s") or 300),
+                                       poll_breach=self._pollb.pop(pid, None))
+                try:
+                    self.shadow_open_tick(pid, mint, sym, ep, qty, size, px, liq, new_peak, reuse=live_reuse)
+                    self.shadow_compare_close(pid, mint, sym, qty, size, pnl, 100 * pnl / size, reason, exit_px)
+                except Exception as e:
+                    self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, error=repr(e), tb=traceback.format_exc()[-600:])
+                return True
+            if src == "dexscreener_poll":   # shadow exit rules keep their 30 s DexScreener cadence, as before
+                try:
+                    self.shadow_open_tick(pid, mint, sym, ep, qty, size, px, liq, new_peak)
+                except Exception as e:
+                    self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, error=repr(e), tb=traceback.format_exc()[-600:])
+            changed = new_peak != peak or new_stop != stop or bool(new_trail) != bool(trail)
+            if changed or src == "dexscreener_poll" or now() - self._last_write.get(pid, 0) >= 5:
+                self._last_write[pid] = now()
+                with self.log.lock:
+                    self.log.db.execute("UPDATE positions SET last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=? WHERE id=? AND status='OPEN'",
+                                        (px, now(), new_peak, new_stop, int(new_trail), pid))
+            return False
+
+    def _source(self, pid, mint, sym, ok, why):
+        """Log every switch between the Helius live trigger and the DexScreener fallback."""
+        prev = self._src_state.get(pid)
+        cur = "helius_ws" if ok else "dexscreener_poll"
+        if prev != cur:
+            self._src_state[pid] = cur
+            self.log.event("Risk", "PRICE_SOURCE", mint, sym, position_id=pid, source=cur, previous=prev, reason=why)
+
+    def _poll_shadow(self, pid, mint, sym, stop, px):
+        """'poll_stop' shadow: first time the old 30 s DexScreener poll would have triggered, while Helius is live."""
+        if pid not in self._pollb and stop and px <= stop:
+            self._pollb[pid] = dict(ts=now(), px=px, stop=stop)
+            self._sev("poll_stop", "BREACH", mint, sym, pid, cycle=self.log.cycle, ds_px=px, stop=stop,
+                      note="shadow: the old DexScreener poll would have exited here; live exit trigger is Helius")
+
+    def _post_watch(self, prices):
+        """After a Helius-triggered exit, keep watching the DexScreener price for a few minutes to measure when
+        the old poll path would have exited (poll_stop COMPARE)."""
+        for pid, w in list(self._post.items()):
+            b = w.get("poll_breach")
+            px = (prices.get(w["pair"]) or (None, None))[0]
+            if not b and px and px <= w["stop"]: b = dict(ts=now(), px=px, stop=w["stop"])
+            if b or now() > w["until"] or w["src"] != "helius_ws":
+                self._post.pop(pid, None)
+                if w["src"] != "helius_ws": continue
+                self._sev("poll_stop", "COMPARE", w["mint"], w["sym"], pid, cycle=self.log.cycle, live_src=w["src"],
+                          live_exit_ts=iso(w["exit_ts"]), live_trigger_px=w["exit_ref"], live_fill_px=w["exit_px"], stop=w["stop"],
+                          poll_breach_ts=(iso(b["ts"]) if b else None), poll_px=(b["px"] if b else None),
+                          poll_seconds_later=(round(b["ts"] - w["exit_ts"], 1) if b else None),
+                          poll_px_vs_live_trigger_pct=(round(100 * (b["px"] / w["exit_ref"] - 1), 3) if b else None),
+                          last_ds_px=px, note=None if b else f"poll had not crossed the stop within {CFG.get('ws_poll_post_watch_s') or 300}s")
+
     def poll(self):
         with HTTP.prefer_live():
             try:
@@ -1151,58 +1254,44 @@ class Risk:
                 self.log.event("Shadow", "ERROR", error=repr(e), tb=traceback.format_exc()[-600:])
             with self.log.lock:
               rows = self.log.db.execute("SELECT id,mint,symbol,pair,entry_price,qty,size_usd,stop_price,peak_price,trail_active,initial_stop FROM positions WHERE status='OPEN'").fetchall()
-            if not rows: return
+            if not rows and not self._post: return
             prices = {}
-            pairs = list({r[3] for r in rows})
+            pairs = list({r[3] for r in rows} | {w["pair"] for w in self._post.values()})
             for i in range(0, len(pairs), 30):
                 d = HTTP.get("https://api.dexscreener.com/latest/dex/pairs/solana/" + ",".join(pairs[i:i+30])) or {}
                 for p in d.get("pairs") or []:
                     prices[p["pairAddress"]] = (float(p.get("priceUsd") or 0), (p.get("liquidity") or {}).get("usd") or 0)
+            try: self._post_watch(prices)
+            except Exception as e: self.log.event("Shadow", "ERROR", rule="poll_stop", error=repr(e))
+            feed = getattr(self, "feed", None)
             for pid, mint, sym, pair, ep, qty, size, stop, peak, trail, istop in rows:
                 if pair not in prices or not prices[pair][0]:
                     self.log.event("Risk", "PRICE_MISSING", mint, sym, pair=pair); continue
                 px, liq = prices[pair]
-                new_peak = max(peak, px)
-                new_trail = trail or new_peak >= ep * (1 + CFG["trail_activate"])
-                new_stop = stop
-                if new_trail: new_stop = max(stop, new_peak * (1 - CFG["trail_dist"]))
-                if new_trail and not trail:
-                    self.log.event("Risk", "TRAIL_ACTIVATED", mint, sym, peak=new_peak, entry=ep, stop=new_stop)
-                live_reuse = None
-                if px <= new_stop:
-                    # live fill first (unchanged model), then shadow can reuse it when the size matches
-                    exit_px, fill_src, model_px, q = paper_sell_fill(mint, qty, px, liq)
-                    live_reuse = dict(ref=px, qty=qty, exit_px=exit_px, src=fill_src, model_px=model_px, q=q)
-                    self.log.event("Risk", "FILL_QUOTE", mint, sym, side="sell", qty=qty, ref_price=px,
-                                   modeled_slip_pct=round(100 * (1 - model_px / px), 3),
-                                   quoted_slip_pct=(round(100 * (1 - q["price"] / px), 3) if q else None),
-                                   jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
-                    proceeds = exit_px * qty; pnl = proceeds - size
-                    reason = "trailing stop" if new_trail else "stop-loss -6%"
-                    with self.log.lock:
-                        db = self.log.db; db.execute("BEGIN IMMEDIATE")
-                        try:   # same all-or-nothing pattern as Risk.open: a failed write must never leave the shared connection mid-transaction
-                            db.execute("""UPDATE positions SET status='CLOSED',last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=?,
-                                closed_ts=?,closed_iso=?,exit_ref=?,exit_price=?,exit_reason=?,pnl_usd=?,pnl_pct=? WHERE id=?""",
-                                (px, now(), new_peak, new_stop, int(new_trail), now(), iso(), px, exit_px, reason, pnl, 100 * pnl / size, pid))
-                            db.execute("UPDATE ledger SET v=v+? WHERE k='cash'", (proceeds,)); db.execute("COMMIT")
-                        except Exception:
-                            db.execute("ROLLBACK"); raise
-                    self.log.event("Risk", "EXIT", mint, sym, reason=reason, ref_price=px, exit_price=exit_px, entry=ep,
-                                   pnl_usd=round(pnl, 2), pnl_pct=round(100 * pnl / size, 2), peak=new_peak, stop=new_stop)
-                    try:
-                        self.shadow_open_tick(pid, mint, sym, ep, qty, size, px, liq, new_peak, reuse=live_reuse)
-                        self.shadow_compare_close(pid, mint, sym, qty, size, pnl, 100 * pnl / size, reason, exit_px)
+                if feed: feed.note_ds(pid, px, liq)
+                ok, why = feed.live_ok(pid) if feed else (False, "helius feed disabled")
+                self._source(pid, mint, sym, ok, why)
+                if ok:   # Helius is the live trigger for this position: the poll only feeds shadows and sanity checks
+                    self._poll_shadow(pid, mint, sym, stop, px)
+                    try: self.shadow_open_tick(pid, mint, sym, ep, qty, size, px, liq, peak)
                     except Exception as e:
                         self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, error=repr(e), tb=traceback.format_exc()[-600:])
-                else:
-                    try:
-                        self.shadow_open_tick(pid, mint, sym, ep, qty, size, px, liq, new_peak)
-                    except Exception as e:
-                        self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, error=repr(e), tb=traceback.format_exc()[-600:])
-                    with self.log.lock:
-                        self.log.db.execute("UPDATE positions SET last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=? WHERE id=?",
-                                            (px, now(), new_peak, new_stop, int(new_trail), pid))
+                    continue
+                self.apply_price(pid, px, liq, "dexscreener_poll")
+
+    def ws_tick(self):
+        """Called every ~0.25 s by the Desk: apply fresh Helius reserve prices to the live rules."""
+        feed = getattr(self, "feed", None)
+        if not feed: return
+        for pid, (px, ts, meta) in feed.prices().items():
+            seen = self._ws_seen.get(pid, (0, 0))
+            if ts <= seen[0] and now() - seen[1] < 2: continue   # new reserve price, or a 2 s re-check of the current one
+            self._ws_seen[pid] = (ts, now())
+            ok, why = feed.live_ok(pid)
+            st = feed.pos.get(pid) or {}
+            self._source(pid, st.get("mint"), st.get("sym"), ok, why)
+            if ok:
+                self.apply_price(pid, px, feed.liq(pid), "helius_ws", trig=meta)
 
 # ---------------------------------------------------------------- v3 shadow-only observers (never trade)
 class FastStopShadow:
@@ -1212,6 +1301,7 @@ class FastStopShadow:
     30 s DexScreener poll. Reads positions; never writes them."""
     def __init__(self, log):
         self.log = log; self.seen = {}   # pid -> dict(first breach)
+        self.last = {}   # v4: pid -> (jupiter px, ts), used by HeliusFeed as a sanity reference
     def _ev(self, kind, mint, sym, pid, **d):
         SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, "fast_stop", kind, mint, sym, pid, cycle=self.log.cycle, **d)
     def tick(self):
@@ -1233,12 +1323,12 @@ class FastStopShadow:
             px = ((d.get(mint) or {}).get("usdPrice")) if isinstance(d, dict) else None
             st = self.seen.setdefault(pid, dict(mint=mint, sym=sym, breach_ts=None, n=0, dev=[]))
             if not px: continue
-            px = float(px); st["n"] += 1
+            px = float(px); st["n"] += 1; self.last[pid] = (px, now())
             if last: st["dev"] = (st["dev"] + [round(100 * (px / last - 1), 2)])[-20:]   # Jupiter vs DexScreener mark
             if st["breach_ts"] is None and stop and px <= stop:
                 st.update(breach_ts=now(), breach_px=px, stop=stop)
                 self._ev("BREACH", mint, sym, pid, jup_px=px, stop=stop, ds_last=last, entry=ep,
-                         jup_vs_ds_pct_recent=st["dev"][-5:], note="log only: live Risk still exits on its 30s DexScreener poll")
+                         jup_vs_ds_pct_recent=st["dev"][-5:], note="log only: Jupiter price/v3 every 10s (live trigger: Helius reserves when healthy, else 30s DexScreener poll)")
     def loop(self):
         while True:
             try: self.tick()
@@ -1299,6 +1389,267 @@ class PumpPortalShadow:
                          unseen_by_scout=len(unseen), unseen_checked=min(30, len(unseen)), unseen_in_scout_window=len(in_window),
                          sample=in_window[:8], note="log only: not added to live discovery")
 
+class HeliusFeed:
+    """v4 LIVE price source for OPEN positions (paper). One Helius standard WebSocket (free plan, max 5
+    connections; we use 1). Subscribes (accountSubscribe, base64 + dataSlice of the 8-byte amount) to the two
+    token vaults of each position's pool and prices the token from the reserves: (quote/10^dq)/(base/10^db) x quote USD.
+    Supported pool programs: PumpSwap, Raydium CPMM, Raydium AMM v4 (constant product). Anything else, a
+    stale/silent socket, a missing fresh reference price, a >ws_max_dev_pct deviation from DexScreener/Jupiter,
+    an RPC-resync mismatch or the daily credit budget => live_ok() is False and Risk falls back to the poll."""
+    LAYOUTS = {   # program id -> (name, vault0 off, vault1 off, mint0 off, mint1 off); validated on live pools 2026-11-17
+        "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": ("pumpswap", 139, 171, 43, 75),
+        "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": ("raydium_cpmm", 72, 104, 168, 200),
+        "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": ("raydium_v4", 336, 368, 400, 432),
+    }
+    QUOTES = {SOL_MINT: "sol", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "usd", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "usd"}
+    def __init__(self, log, fast):
+        self.log, self.fast = log, fast
+        self.pos, self.subs, self.req = {}, {}, {}
+        self.lock = threading.RLock()
+        self.ws = None; self.connected = False; self.next_id = 100
+        self.sol = (None, 0.0); self.connects = 0; self.rpc_calls = 0; self.bytes_seen = 0; self._last_rx_bytes = 0
+        self.day = time.strftime("%Y-%m-%d"); self.over_budget = False
+        with log.lock:
+            log.db.execute("CREATE TABLE IF NOT EXISTS helius_ws_usage(day TEXT PRIMARY KEY, bytes INT, rpc_calls INT, connects INT, credits_est REAL)")
+            r = log.db.execute("SELECT bytes,rpc_calls,connects FROM helius_ws_usage WHERE day=?", (self.day,)).fetchone()
+        self.base_bytes, self.base_rpc, self.base_conn = (r or (0, 0, 0))
+    # ---- accounting (2 credits / 0.1 MB streamed, 1 credit per connection, 1 credit per RPC call)
+    def credits_today(self):
+        b = self.base_bytes + self.bytes_seen
+        return round(b / 100000 * 2 + self.base_conn + self.connects + self.base_rpc + self.rpc_calls, 1)
+    def _account(self, flush=False):
+        if self.ws:
+            d = self.ws.rx_bytes - self._last_rx_bytes
+            if d > 0: self.bytes_seen += d; self._last_rx_bytes = self.ws.rx_bytes
+        day = time.strftime("%Y-%m-%d")
+        if day != self.day:
+            self._flush(); self.day = day; self.base_bytes = self.base_rpc = self.base_conn = 0
+            self.bytes_seen = self.rpc_calls = self.connects = 0; self.over_budget = False
+        if self.credits_today() > (CFG.get("helius_ws_daily_credits") or 6000) and not self.over_budget:
+            self.over_budget = True
+            self.log.event("Risk", "WS_BUDGET", credits_est=self.credits_today(), note="daily Helius WS budget reached: poll fallback until tomorrow")
+        if flush: self._flush()
+    def _flush(self):
+        with self.log.lock:
+            self.log.db.execute("INSERT INTO helius_ws_usage(day,bytes,rpc_calls,connects,credits_est) VALUES(?,?,?,?,?) ON CONFLICT(day) DO UPDATE SET "
+                                "bytes=excluded.bytes,rpc_calls=excluded.rpc_calls,connects=excluded.connects,credits_est=excluded.credits_est",
+                                (self.day, self.base_bytes + self.bytes_seen, self.base_rpc + self.rpc_calls, self.base_conn + self.connects, self.credits_today()))
+    # ---- helpers
+    def _rpc(self, method, params):
+        url = helius_rpc_url()
+        if not url: return None
+        self.rpc_calls += 1
+        d = HTTP.get(url, body={"jsonrpc": "2.0", "id": 1, "method": method, "params": params}, tries=2, priority=True)
+        return d.get("result") if isinstance(d, dict) else None
+    def _sol_usd(self):
+        px, ts = self.sol
+        if not px or now() - ts > 30:
+            d = HTTP.get("https://api.dexscreener.com/tokens/v1/solana/" + SOL_MINT, cache_s=20, tries=2) or []
+            best = None
+            for p in d if isinstance(d, list) else []:
+                if (p.get("baseToken") or {}).get("address") != SOL_MINT: continue
+                if (p.get("quoteToken") or {}).get("symbol") not in ("USDC", "USDT"): continue
+                if not best or ((p.get("liquidity") or {}).get("usd") or 0) > ((best.get("liquidity") or {}).get("usd") or 0): best = p
+            if best and best.get("priceUsd"): self.sol = (float(best["priceUsd"]), now())
+        return self.sol[0]
+    def _unsupported(self, pid, mint, sym, pair, why):
+        self.pos[pid] = dict(pid=pid, mint=mint, sym=sym, pair=pair, unsupported=why, px=None)
+        self.log.event("Risk", "WS_UNSUPPORTED", mint, sym, position_id=pid, reason=why)
+    def _resolve(self, pid, mint, sym, pair):
+        a = self._rpc("getAccountInfo", [pair, {"encoding": "base64"}])
+        v = (a or {}).get("value") if isinstance(a, dict) else None
+        if not v: return self._unsupported(pid, mint, sym, pair, "pool account not found")
+        L = self.LAYOUTS.get(v.get("owner"))
+        if not L: return self._unsupported(pid, mint, sym, pair, f"pool program {str(v.get('owner'))[:8]}... not supported (CLMM/DLMM/other)")
+        data = base64.b64decode(v["data"][0]); kind, v0, v1, m0, m1 = L
+        if len(data) < max(v0, v1, m0, m1) + 32: return self._unsupported(pid, mint, sym, pair, "pool data too short")
+        pk = lambda o: SWL.b58e(data[o:o + 32])
+        vaults, mints = (pk(v0), pk(v1)), (pk(m0), pk(m1))
+        if mint not in mints: return self._unsupported(pid, mint, sym, pair, "position mint not in pool")
+        bi = mints.index(mint); qi = 1 - bi
+        if mints[qi] not in self.QUOTES: return self._unsupported(pid, mint, sym, pair, f"quote {mints[qi][:6]}... not SOL/USDC/USDT")
+        r = self._rpc("getMultipleAccounts", [[vaults[bi], vaults[qi]], {"encoding": "jsonParsed"}]) or {}
+        vals = r.get("value") or []
+        try:
+            ib, iq = [x["data"]["parsed"]["info"] for x in vals]
+            assert ib["mint"] == mint and iq["mint"] == mints[qi]
+        except Exception:
+            return self._unsupported(pid, mint, sym, pair, "vault check failed")
+        slot = (r.get("context") or {}).get("slot") or 0
+        st = dict(pid=pid, mint=mint, sym=sym, pair=pair, kind=kind, unsupported=None, vb=vaults[bi], vq=vaults[qi],
+                  db=int(ib["tokenAmount"]["decimals"]), dq=int(iq["tokenAmount"]["decimals"]), qkind=self.QUOTES[mints[qi]],
+                  amt={vaults[bi]: int(ib["tokenAmount"]["amount"]), vaults[qi]: int(iq["tokenAmount"]["amount"])},
+                  slot={vaults[bi]: slot, vaults[qi]: slot}, note_ts=now(), px=None, px_ts=0.0, px_slot=0, subs=[],
+                  ds=None, liq=0, resync_dev=None, last_resync=now(), devs=[], n=0)
+        self.pos[pid] = st
+        self._calc(st, force=True)
+        self.log.event("Risk", "WS_TRACK", mint, sym, position_id=pid, pool=kind, quote=st["qkind"], px=st["px"])
+        if self.connected: self._subscribe(st)
+    def _calc(self, st, force=False):
+        sb, sq = st["slot"][st["vb"]], st["slot"][st["vq"]]
+        # Both vaults move in the same slot on a swap: wait (<=1.5 s) for the pair so a half-updated pair is never priced.
+        if sb != sq and not force and now() - st["note_ts"] < 1.5: return
+        ab, aq = st["amt"][st["vb"]], st["amt"][st["vq"]]
+        if ab <= 0 or aq <= 0: return
+        usd = 1.0 if st["qkind"] == "usd" else self._sol_usd()
+        if not usd: return
+        px = (aq / 10 ** st["dq"]) / (ab / 10 ** st["db"]) * usd
+        if px != st["px"] or force:
+            st["px"], st["px_ts"], st["px_slot"] = px, now(), max(sb, sq); st["n"] += 1
+        st["pending"] = False
+    def _subscribe(self, st):
+        st["subs"] = []
+        for v in (st["vb"], st["vq"]):
+            self.next_id += 1; self.req[self.next_id] = (st["pid"], v)
+            self.ws.send({"jsonrpc": "2.0", "id": self.next_id, "method": "accountSubscribe",
+                          "params": [v, {"encoding": "base64", "commitment": "confirmed", "dataSlice": {"offset": 64, "length": 8}}]})
+    def _drop(self, pid):
+        st = self.pos.pop(pid, None)
+        for sid in (st or {}).get("subs") or []:
+            self.subs.pop(sid, None)
+            if self.connected:
+                try: self.next_id += 1; self.ws.send({"jsonrpc": "2.0", "id": self.next_id, "method": "accountUnsubscribe", "params": [sid]})
+                except Exception: pass
+    def _sync(self):
+        with self.log.lock:
+            rows = self.log.db.execute("SELECT id,mint,symbol,pair FROM positions WHERE status='OPEN'").fetchall()
+        open_ids = {r[0] for r in rows}
+        with self.lock:
+            for pid in [p for p in self.pos if p not in open_ids]: self._drop(pid)
+            for pid, mint, sym, pair in rows:
+                if pid not in self.pos: self._resolve(pid, mint, sym, pair)
+    def _resync(self):
+        """Every 60 s: independent RPC snapshot of both vaults (1 call). A >3% mismatch vs the stream disables the
+        live trigger for that position until the next clean resync; the snapshot is adopted if it is newer."""
+        for st in list(self.pos.values()):
+            if st.get("unsupported") or now() - st["last_resync"] < 60: continue
+            st["last_resync"] = now()
+            r = self._rpc("getMultipleAccounts", [[st["vb"], st["vq"]], {"encoding": "jsonParsed"}]) or {}
+            try:
+                ib, iq = [x["data"]["parsed"]["info"] for x in r.get("value") or []]
+                slot = (r.get("context") or {}).get("slot") or 0
+                ab, aq = int(ib["tokenAmount"]["amount"]), int(iq["tokenAmount"]["amount"])
+            except Exception:
+                continue
+            usd = 1.0 if st["qkind"] == "usd" else self._sol_usd()
+            rpx = (aq / 10 ** st["dq"]) / (ab / 10 ** st["db"]) * (usd or 0)
+            with self.lock:
+                st["resync_dev"] = round(100 * (st["px"] / rpx - 1), 3) if st["px"] and rpx else None
+                if slot >= st.get("px_slot", 0):
+                    st["amt"][st["vb"]], st["amt"][st["vq"]] = ab, aq
+                    st["slot"][st["vb"]] = st["slot"][st["vq"]] = slot
+                    self._calc(st, force=True)
+    def _handle(self, m):
+        if "id" in m and m.get("id") in self.req:
+            pid, v = self.req.pop(m["id"])
+            if "result" in m and pid in self.pos:
+                self.subs[m["result"]] = (pid, v); self.pos[pid].setdefault("subs", []).append(m["result"])
+            elif "error" in m:
+                self.log.event("Risk", "WS_SUB_ERROR", position_id=pid, error=str(m.get("error"))[:200])
+            return
+        if m.get("method") != "accountNotification": return
+        p = m.get("params") or {}
+        hit = self.subs.get(p.get("subscription"))
+        if not hit: return
+        pid, v = hit; st = self.pos.get(pid)
+        if not st: return
+        res = p.get("result") or {}
+        raw = base64.b64decode(((res.get("value") or {}).get("data") or [""])[0] or "")
+        if len(raw) < 8: return
+        with self.lock:
+            st["amt"][v] = struct.unpack("<Q", raw[:8])[0]
+            st["slot"][v] = (res.get("context") or {}).get("slot") or st["slot"][v]
+            st["note_ts"] = now(); st["pending"] = True
+            self._calc(st)
+    def _status(self):
+        self._account(flush=True)
+        self.log.event("Risk", "WS_STATUS", connected=self.connected, positions=len(self.pos),
+                       tracked=sum(1 for s in self.pos.values() if not s.get("unsupported")), credits_today_est=self.credits_today(),
+                       bytes_today=self.base_bytes + self.bytes_seen, rpc_calls_today=self.base_rpc + self.rpc_calls,
+                       per_pos={s.get("sym"): dict(n=s.get("n"), px=s.get("px"), resync_dev=s.get("resync_dev"), devs=s.get("devs", [])[-5:],
+                                                    unsupported=s.get("unsupported")) for s in self.pos.values()})
+    # ---- used by Risk (other threads)
+    def note_ds(self, pid, px, liq):
+        st = self.pos.get(pid)
+        if st is not None: st["ds"] = (px, now()); st["liq"] = liq
+    def liq(self, pid): return (self.pos.get(pid) or {}).get("liq") or 0
+    def prices(self):
+        out = {}
+        with self.lock:
+            for pid, st in self.pos.items():
+                if st.get("px") and not st.get("unsupported") and not st.get("pending"):
+                    out[pid] = (st["px"], st["px_ts"], dict(ws_slot=st.get("px_slot"), ws_pool=st.get("kind")))
+        return out
+    def live_ok(self, pid):
+        if not CFG.get("helius_ws_live"): return False, "helius_ws_live off"
+        if self.over_budget: return False, "daily Helius WS credit budget reached"
+        if not self.connected or not self.ws: return False, "ws disconnected"
+        silent = now() - self.ws.last_rx
+        if silent > (CFG.get("ws_silent_s") or 15): return False, f"ws silent {silent:.0f}s"
+        st = self.pos.get(pid)
+        if not st: return False, "not tracked yet"
+        if st.get("unsupported"): return False, st["unsupported"]
+        if len(st.get("subs") or []) < 2: return False, "subscribing"
+        if not st.get("px"): return False, "no reserve price yet"
+        if st.get("resync_dev") is not None and abs(st["resync_dev"]) > 3: return False, f"stream vs RPC snapshot {st['resync_dev']}%"
+        refs = {}
+        if st.get("ds") and now() - st["ds"][1] <= 90: refs["dexscreener"] = st["ds"][0]
+        j = (getattr(self.fast, "last", {}) or {}).get(pid)
+        if j and now() - j[1] <= 30: refs["jupiter"] = j[0]
+        if not refs: return False, "no fresh DexScreener/Jupiter reference"
+        devs = {k: 100 * (st["px"] / v - 1) for k, v in refs.items() if v}
+        best = min(devs.items(), key=lambda kv: abs(kv[1]))
+        st["devs"] = (st.get("devs", []) + [round(best[1], 2)])[-50:]
+        if abs(best[1]) > (CFG.get("ws_max_dev_pct") or 8.0):
+            return False, f"reserve price {best[1]:+.1f}% vs {best[0]} (>{CFG.get('ws_max_dev_pct') or 8.0}%)"
+        return True, f"ok ({best[0]} {best[1]:+.2f}%)"
+    # ---- thread
+    def loop(self):
+        import wsmini, socket as _sock
+        backoff = 5
+        while True:
+            url = helius_rpc_url()
+            if not url or not CFG.get("helius_ws_live"):
+                time.sleep(300); continue
+            try:
+                self._sync()
+                if self.over_budget: raise RuntimeError("daily credit budget reached")
+                self.ws = wsmini.WS(url.replace("https://", "wss://", 1), timeout=15)
+                self.ws.sock.settimeout(0.5); self._last_rx_bytes = 0
+                self.connects += 1; self.subs.clear(); self.req.clear()
+                self.connected = True; backoff = 5
+                self.log.event("Risk", "WS_CONNECTED", positions=len(self.pos))
+                with self.lock:
+                    for st in self.pos.values():
+                        if not st.get("unsupported"): self._subscribe(st)
+                t_ping = t_sync = t_res = t_stat = now()
+                while True:
+                    t = now()
+                    if t - t_sync >= 2: self._sync(); t_sync = t
+                    if t - t_ping >= 5: self.ws.ping(); t_ping = t
+                    if t - t_res >= 10: self._resync(); t_res = t
+                    if t - t_stat >= 600: self._status(); t_stat = t
+                    self._account()
+                    if self.over_budget: raise RuntimeError("daily credit budget reached")
+                    if t - self.ws.last_rx > 30: raise ConnectionError("no data or pong for 30s")
+                    with self.lock:
+                        for st in self.pos.values():
+                            if st.get("pending"): self._calc(st)
+                    try: msg = self.ws.recv()
+                    except _sock.timeout: continue
+                    self._handle(json.loads(msg))
+            except Exception as e:
+                err = re.sub(r"api-key=[^&\s'\"]+", "api-key=***", repr(e))[:200]
+                was = self.connected; self.connected = False
+                self.log.event("Risk", "WS_RECONNECT", error=err, backoff_s=backoff, was_connected=was)
+                try: self._account(flush=True)
+                except Exception: pass
+            finally:
+                if self.ws:
+                    try: self.ws.close()
+                    except Exception: pass
+            time.sleep(backoff if not self.over_budget else 600); backoff = min(backoff * 2, 120)
+
     # ---------------------------------------------------------------- Orchestrator
 class Desk:
     def __init__(self):
@@ -1307,6 +1658,13 @@ class Desk:
         self.stop = threading.Event()
         self.shadow_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shadow")
         self.fast = FastStopShadow(self.log)
+        self.feed = HeliusFeed(self.log, self.fast) if helius_rpc_url() else None
+        self.risk.feed = self.feed
+    def ws_risk_loop(self):
+        while not self.stop.is_set():
+            try: self.risk.ws_tick()
+            except Exception as e: self.log.event("Risk", "WS_ERROR", error=repr(e)[:300], tb=traceback.format_exc()[-800:])
+            self.stop.wait(0.25)
     def risk_loop(self):
         while not self.stop.is_set():
             try: self.risk.poll()
@@ -1382,6 +1740,9 @@ class Desk:
             self.cycle(); print("http", HTTP.stats, flush=True); return
         threading.Thread(target=self.risk_loop, daemon=True).start()
         threading.Thread(target=self.fast.loop, daemon=True, name="fast-stop-shadow").start()
+        if self.feed:
+            threading.Thread(target=self.feed.loop, daemon=True, name="helius-ws").start()
+            threading.Thread(target=self.ws_risk_loop, daemon=True, name="ws-risk").start()
         if self.scout.pp: threading.Thread(target=self.scout.pp.loop, daemon=True, name="pumpportal-shadow").start()
         while True:
             t0 = now()
