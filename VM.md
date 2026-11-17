@@ -2,27 +2,32 @@
 
 Questo file descrive come è installato il desk su una macchina virtuale. Non contiene indirizzi IP, chiavi SSH o segreti.
 
+Il desk live gira su una VM Oracle Always Free (Ubuntu, forma Micro AMD) nella home region. La copia di sviluppo non deve essere avviata se è presente il marker locale `RUNNING_ON_VM` (è nel `.gitignore`): `run.sh` rifiuta l'avvio.
+
 ## Layout
 
 - Codice e stato: `/opt/memedesk` (utente di sistema `memedesk`)
 - Segreti: `/etc/memedesk/memedesk.env` (root, modalità 600), caricati da systemd con `EnvironmentFile`. Variabili: vedi `.env.example`. Non ci sono file `.env` nella directory dell'app: `syncer.py` e `notify.py` usano l'ambiente se quei file mancano.
 - Python: `/usr/bin/python3` (stdlib, senza venv)
-- Fuso orario consigliato: Europe/Rome
+- Fuso orario consigliato: Europe/Rome, con NTP attivo
+- Swap consigliato su una VM da ~1 GB, con `vm.swappiness=10`
 
 ## Unità systemd (copie in `deploy/`)
 
-- `memedesk.service`: avvia `run.sh` (desk + syncer + smartwallets), `Restart=always`, abilitato al boot. Limiti memoria e hardening (`MemoryHigh` / `MemoryMax`, `ProtectSystem=strict`, `NoNewPrivileges`, `PrivateTmp`).
+- `memedesk.service`: avvia `run.sh` (desk + syncer + smartwallets), `Restart=always`, abilitato al boot. Limiti memoria e hardening (`MemoryHigh=700M` / `MemoryMax=850M`, `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`).
 - `memedesk-watchdog.timer` → `memedesk-watchdog.service`: ogni 5 minuti esegue `vm_watchdog.py`. Se non c'è un ciclo da più di 10 minuti, riavvia il servizio e manda al massimo un avviso Telegram all'ora. Controlla anche che il bot Telegram risponda e svuota la coda.
 
 Altri file in `deploy/`: rotazione log, tetto di journald, sysctl (swappiness).
+
+Un controllo esterno (Cloudflare Worker cron, piano Free) avvisa su Telegram se la VM intera è irraggiungibile per più di 15 minuti. Non usa minuti di Grok Bot. Sorgente in `monitor/`.
 
 ## Comandi sulla VM
 
 ```bash
 sudo systemctl restart memedesk
 systemctl status memedesk --no-pager
-tail -f /opt/memedesk/desk.out
-grep " cycle " /opt/memedesk/desk.out | tail -1
+sudo tail -f /opt/memedesk/desk.out
+sudo grep " cycle " /opt/memedesk/desk.out | tail -1
 sudo systemctl stop memedesk
 # Se lo stop deve durare, ferma anche il watchdog, altrimenti dopo 10 minuti riparte:
 sudo systemctl disable --now memedesk memedesk-watchdog.timer
@@ -34,11 +39,25 @@ Da un altro computer, con host e chiave impostati da te (nessun valore predefini
 VM=user@host KEY=/path/to/ssh_key ./vm_status.sh
 ```
 
+In console Oracle non usare Terminate: cancellerebbe la VM. Stop e Reboot fermano il desk.
+
+## Servizi disattivati sulla VM Oracle (si possono riaccendere)
+
+- `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`
+- Plugin Oracle Cloud Agent `gomon` e `oci-wlp`: in `/etc/oracle-cloud-agent/agent.yml` imposta `disabled: false` e poi `sudo snap restart oracle-cloud-agent`
+- Non disattivare `snapd`, l'agente Oracle, l'updater o `runcommand`. Non disattivare `iscsid` se potresti attaccare un volume.
+
+Gli aggiornamenti di sicurezza automatici restano accesi; il riavvio automatico è disattivato (`Unattended-Upgrade::Automatic-Reboot "false"`).
+
+## Rischio di recupero per inattività (Always Free)
+
+Oracle può recuperare un'istanza Always Free se, in 7 giorni, il 95° percentile della CPU è sotto il 20% e l'utilizzo di rete è sotto il 20%. La soglia sulla memoria vale solo per le forme A1. Il desk è prevalentemente in attesa di rete tra un ciclo e l'altro, quindi il rischio esiste. Un ping quotidiano non basta. La mitigazione proposta (non applicata) è un timer a bassa priorità che alzi il P95 della CPU solo se i grafici OCI restano sotto soglia per più giorni, senza toccare le regole di trading.
+
 ## Migrazione verso un'altra VM
 
 La copia live dello stato è sulla VM di origine, non su un computer di sviluppo.
 
-1. Installa sulle destinazione le stesse unità e lo stesso `EnvironmentFile`.
+1. Installa sulla destinazione le stesse unità e lo stesso `EnvironmentFile`.
 2. Sulla sorgente: `sudo systemctl disable --now memedesk-watchdog.timer memedesk`, poi una copia coerente del database:
 
    ```bash
@@ -48,4 +67,4 @@ La copia live dello stato è sulla VM di origine, non su un computer di sviluppo
    Copia `/tmp/desk.sqlite` e, se servono, `events.jsonl`, `*_state.json`, `summary.txt` e i log `*.out` in `/opt/memedesk` sulla destinazione.
 3. Avvia il servizio sulla destinazione, verifica che i cicli partano e che la dashboard si aggiorni, poi spegni in modo definitivo la sorgente.
 
-Non avviare una seconda copia del desk sullo stesso stato. Se usi un checkout di sviluppo, lascia un marker locale `RUNNING_ON_VM` (è nel `.gitignore`) così `run.sh` rifiuta l'avvio.
+Non avviare una seconda copia del desk sullo stesso stato.

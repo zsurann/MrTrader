@@ -40,15 +40,15 @@ CFG = dict(
     # Loop
     scan_interval_s=180, rugcheck_cache_s=600,
     # Perf (no effect on rules): parallel I/O, background GeckoTerminal discovery, RPC cache for revoked mints
-    http_workers=8, filter_workers=4, gt_refresh_s=150, rpc_revoked_cache_s=3600,
+    http_workers=6, filter_workers=4, gt_refresh_s=180, rpc_revoked_cache_s=3600,
     old_mint_cache_s=1800,  # skip re-pricing mints already killed as pair-too-old; TTL so a new pair is still seen
     hard_filter_cache_s=1800,  # skip RugCheck for permanent hard kills (rugged / past rugs / transfer fee / permanent delegate)
     jsonl_rotate_bytes=15 * 1024 * 1024,
     # API pacing / caches (no effect on rules). Jupiter lite list TTLs by interval; 5m stays fresh each cycle.
-    jup_list_ttl={"5m": 90, "1h": 180, "6h": 480, "24h": 600},
+    jup_list_ttl={"5m": 90, "1h": 210, "6h": 540, "24h": 780},  # staggered so list refreshes do not pile up
     jup_search_cache_s=45,   # only long enough to dedupe decimals+analyst in the same cycle
     jup_quote_cache_s=8,     # shadow/live reuse of the same paper quote
-    gt_page_cache_s=150,     # shared with smartwallets so both processes don't re-fetch the same GT page
+    gt_page_cache_s=180,     # shared with smartwallets; aligned with scan_interval_s
 )
 # Shadow-only exit variants. Log only: never read by live Executor/Risk. Do not put these in CFG.
 SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the live trail, then 4% under the peak (live uses 6%)
@@ -67,9 +67,12 @@ class Http:
     `priority=True` (open-position price monitoring) waits only the base gap, not a 429-widened one."""
     # Gaps are minimum seconds between *process-wide* calls. lite-api.jup.ag ~1 RPS free; GT ~30 req/min;
     # api.jup.ag free key = 1 RPS; Helius free = 10 RPS; DexScreener is generous.
-    BASE_GAP = {"api.dexscreener.com": 0.22, "api.rugcheck.xyz": 1.2, "api.geckoterminal.com": 2.15,
-                "api.mainnet-beta.solana.com": 0.5, "lite-api.jup.ag": 1.05, "api.jup.ag": 1.1,
+    # Tuned for the Oracle E2.1.Micro (free-tier caps, shared desk+smartwallets limiter).
+    BASE_GAP = {"api.dexscreener.com": 0.22, "api.rugcheck.xyz": 1.2, "api.geckoterminal.com": 2.8,
+                "api.mainnet-beta.solana.com": 0.7, "lite-api.jup.ag": 1.25, "api.jup.ag": 1.25,
                 "mainnet.helius-rpc.com": 0.12}
+    MIN_429_WAIT = {"api.geckoterminal.com": 12.0, "lite-api.jup.ag": 6.0, "api.jup.ag": 6.0,
+                    "api.mainnet-beta.solana.com": 4.0}
     POOL_MAX = 6
     RATE_DIR = os.path.join(DATA, ".api_rate")
     CACHE_DIR = os.path.join(DATA, ".api_cache")
@@ -266,6 +269,7 @@ class Http:
                     if code == 429: self._slow(host)
                     ra = resp.getheader("Retry-After") if resp else None
                     extra = float(ra) if ra and str(ra).replace(".", "", 1).isdigit() else delay
+                    extra = max(extra, self.MIN_429_WAIT.get(host, 0))
                     time.sleep(extra + random.random() * 0.4)
                     delay = min(delay * 2, 60); i += 1; continue
                 return None
@@ -411,7 +415,7 @@ class Logger:
         self.db.execute("PRAGMA synchronous=NORMAL")   # WAL+NORMAL: durable on checkpoint, no fsync per row
         self.db.execute("PRAGMA busy_timeout=8000")
         self.db.execute("PRAGMA temp_store=MEMORY")
-        self.db.execute("PRAGMA cache_size=-8000")     # 8 MB page cache, modest on the e2-micro
+        self.db.execute("PRAGMA cache_size=-8000")     # 8 MB page cache, modest on the 1 GB Always Free VM
         self.db.execute("PRAGMA wal_autocheckpoint=1000")
         self.jsonl = open(JSONL_PATH, "a", buffering=1)  # one handle, line-buffered
         self.db.executescript("""

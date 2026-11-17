@@ -1,14 +1,10 @@
 #!/bin/bash
-# Prints MemeDesk status on the VM over SSH (PAPER ONLY). No secrets.
-# Usage: VM=user@host KEY=/path/to/ssh_key ./vm_status.sh
-set -euo pipefail
-if [ -z "${VM:-}" ] || [ -z "${KEY:-}" ]; then
-  echo "Set VM=user@host and KEY=/path/to/ssh_key" >&2
-  exit 1
-fi
+# Prints MemeDesk status on the Oracle Always Free VM over SSH (PAPER ONLY). No secrets.
+# Usage: VM=ubuntu@host KEY=$HOME/.ssh/oci_memedesk ./vm_status.sh
+VM=${VM:?set VM=user@host}; KEY=${KEY:-$HOME/.ssh/oci_memedesk}
 ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=15 "$VM" bash -s <<'REMOTE'
-echo "== memedesk.service: $(systemctl is-active memedesk) (since $(systemctl show memedesk -p ActiveEnterTimestamp --value))"
-echo "== watchdog timer:   $(systemctl is-active memedesk-watchdog.timer)"
+echo "== memedesk.service: $(systemctl is-active memedesk) enabled=$(systemctl is-enabled memedesk) (since $(systemctl show memedesk -p ActiveEnterTimestamp --value))"
+echo "== watchdog timer:   $(systemctl is-active memedesk-watchdog.timer) enabled=$(systemctl is-enabled memedesk-watchdog.timer)"
 echo "== last cycles:"
 sudo grep " cycle " /opt/memedesk/desk.out | tail -5
 echo "== processes:"

@@ -107,7 +107,10 @@ def gt_trades(get, pair, min_usd=None):
     """GeckoTerminal last <=300 trades of a pool (free, carries tx_from_address). None on failure."""
     url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair}/trades"
     if min_usd: url += f"?trade_volume_in_usd_greater_than={min_usd}"
-    d = get(url)
+    try:
+        d = get(url, cache_s=90)  # shared HTTP cache; Analyst + builder reuse the same pool snapshot
+    except TypeError:
+        d = get(url)
     if not d or not isinstance(d.get("data"), list): return None
     out = []
     for x in d["data"]:

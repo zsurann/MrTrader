@@ -1,0 +1,15 @@
+{
+  "name": "memedesk-monitor",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-17",
+  "account_id": "2cead89c2a1b79bf988d406cba086725",
+  "workers_dev": true,
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": true } },
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "vars": {
+    "SUPABASE_URL": "https://phffxfwdjyagkmcfuxft.supabase.co"
+  },
+  "kv_namespaces": [
+    { "binding": "STATE", "id": "379c96bd2fae4f599bc439e03c21f630" }
+  ]
+}

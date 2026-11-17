@@ -3,7 +3,7 @@
 # All three are independent processes: if Supabase/sync or the smart-wallet builder dies, trading is never blocked.
 cd "$(cd "$(dirname "$0")" && pwd)"
 if [ -f RUNNING_ON_VM ] || [ -f RUNNING_ON_GCP ]; then
-  echo "Refusing to start: this copy is not the live desk (see RUNNING_ON_VM / RUNNING_ON_GCP)." >&2
+  echo "Refusing to start: this copy is not the live desk (see RUNNING_ON_VM)." >&2
   exit 1
 fi
 echo $$ > supervisor.pid
@@ -20,7 +20,7 @@ ts() { date '+%F %T %Z'; }
 ) &
 
 (   # smart-wallet builder + shadow exit rule (free on-chain data, background, log-only)
-  # Lower CPU/IO priority so the desk cycle stays responsive on the e2-micro.
+  # Lower CPU/IO priority so the desk cycle stays responsive on the small Always Free VM.
   while true; do
     nice -n 10 ionice -c2 -n 7 python3 -u smartwallets.py >> smart.out 2>&1 &
     echo $! > smart.pid

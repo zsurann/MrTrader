@@ -15,17 +15,18 @@ KillMode=control-group
 Restart=always
 RestartSec=10
 TimeoutStopSec=30
-# Survive memory pressure on the e2-micro better than other processes
+# Limits sized for a ~1 GB Always Free VM (desk + syncer + smartwallets in one cgroup)
 MemoryHigh=700M
 MemoryMax=850M
 OOMScoreAdjust=-300
-Nice=0
-IOSchedulingClass=2
-IOSchedulingPriority=2
-NoNewPrivileges=yes
-PrivateTmp=yes
+TasksMax=256
+NoNewPrivileges=true
+PrivateTmp=true
 ProtectSystem=strict
+ProtectHome=true
 ReadWritePaths=/opt/memedesk
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
 
 [Install]
 WantedBy=multi-user.target
