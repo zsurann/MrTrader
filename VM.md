@@ -106,6 +106,22 @@ Solo paper. Le regole live non cambiano.
 - Nuove regole shadow (solo log): ingresso `organic_50`, `churn_50`, `m5_chase_10`, `top1_10`; uscita `time_stop_60m`, `breakeven_8`. La dashboard riceve i dati in `rule_v5` (interfaccia invariata).
 - Rollback: rimettere i file della versione precedente, oppure `SW["helius_smart"]=False`.
 
+## Regole live v6 (approvate dall'utente, 2026-11-17)
+
+Solo paper, valgono per le nuove posizioni.
+
+| regola | prima | v6 |
+| --- | --- | --- |
+| stop iniziale | −6% dal prezzo pagato | −10% dal prezzo di mercato all'ingresso |
+| trailing | da +12% sul prezzo pagato, 6% sotto il picco | da +12% sul prezzo di mercato all'ingresso, 6% sotto il picco |
+| taglia | 8% dell'equity | 5% dell'equity, al massimo lo 0,25% della liquidità del pool |
+| liquidità minima | 40.000 $ | 100.000 $ |
+| fattore smart wallet | 0 wallet = 0 (circa −15 punti) | può solo aggiungere: base + 0,15 × smart/100 × (100 − base); con 3+ wallet uguale a prima |
+| soglia punteggio | 70 | 70 |
+
+Perché: si comprava circa il 2,9% sopra il prezzo di mercato, quindi lo stop a −6% scattava dopo circa il 3% di discesa, e gli stop chiudevano a −11%. Entrata più uscita costavano circa il 5,5% con 800 $. Con lo 0,25% della liquidità il modello dà circa l'1,25% per lato, circa il 2,5% in totale.
+La regola shadow `old_rules_v5` registra cosa avrebbero fatto le regole precedenti. Il trailing shadow al 4% ora parte dallo stesso prezzo di mercato della regola live.
+
 ## Servizi disattivati sulla VM Oracle (si possono riaccendere)
 
 - `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`

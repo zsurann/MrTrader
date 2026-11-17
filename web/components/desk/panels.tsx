@@ -127,8 +127,8 @@ export const Kpis = memo(function Kpis({ status, lastCycle, positions, loading }
           value={usd(status?.equity, 2)}
           sub={pnl == null ? "da $10.000" : <span className={tone(pnl)}>{signedUsd(pnl)} · {pct((100 * pnl) / start, 2)} da {usd(start)}</span>} />
       </div>
-      <Kpi label="Cassa" loading={loading} value={usd(status?.cash, 2)} sub="max 8% per trade" />
-      <Kpi label="Posizioni aperte" loading={loading} flashKey={status?.open_positions} value={status?.open_positions ?? "—"} sub="stop −6% · trailing dopo +12%" />
+      <Kpi label="Cassa" loading={loading} value={usd(status?.cash, 2)} sub="max 5% per trade (≤0,25% liq)" />
+      <Kpi label="Posizioni aperte" loading={loading} flashKey={status?.open_positions} value={status?.open_positions ?? "—"} sub="stop −10% dal mercato · trailing dopo +12%" />
       <Kpi label="Realizzato" loading={loading} flashKey={realized} dir={realized}
         value={<span className={tone(realized)}>{signedUsd(realized)}</span>} sub={`${closed.length} trade · win ${wins}/${closed.length}`} />
       <Kpi label="Ultimo ciclo" loading={loading} value={lastCycle?.stats.secs != null ? `${lastCycle.stats.secs.toLocaleString("it-IT")}s` : "—"} sub={`scansione ogni ${CYCLE_S}s`} />

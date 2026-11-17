@@ -305,7 +305,7 @@ class Notifier:
             elif kind == "ENTRY":
                 o = d.get("order") or {}
                 self.send(f"🟦 INGRESSO paper {sym} ({hm(ts)})\nsize {usd(o.get('size_usd') or 0)} · prezzo {o.get('fill_price'):.6g}"
-                          f" · slippage {o.get('slippage_pct')}%\nstop −6% a {o.get('stop_price'):.6g} · score {o.get('score')}")
+                          f" · slippage {o.get('slippage_pct')}%\nstop −{100 * (1 - (o.get('stop_price') or 0) / (o.get('ref_price') or o.get('fill_price') or 1)):.0f}% dal prezzo di mercato a {o.get('stop_price'):.6g} · score {o.get('score')}")
             elif kind == "EXIT":
                 p = d.get("pnl_usd") or 0
                 self.send(f"{'🟩' if p >= 0 else '🟥'} USCITA paper {sym} ({hm(ts)}) · {d.get('reason')}\nPnL {usd(p)} ({pct(d.get('pnl_pct') or 0)})")

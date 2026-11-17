@@ -25,7 +25,7 @@ CFG = dict(
     # Scout
     min_age_h=0.5, max_age_h=72.0, min_mcap=300_000, max_mcap=20_000_000,
     # Filter
-    min_liq=40_000, min_vol_h1=50_000, max_top10_pct=25.0, max_dev_pct=3.0,
+    min_liq=100_000, min_vol_h1=50_000, max_top10_pct=25.0, max_dev_pct=3.0,   # v6 (user-approved): min liquidity 40k -> 100k
     max_bundle_pct=10.0, max_h1_change=80.0, min_primary_lp_locked=90.0,
     min_weighted_lp_locked=80.0, past_rug_dead_mcap=10_000, past_rug_min_dead=2,
     # Analyst
@@ -33,10 +33,11 @@ CFG = dict(
     weights=dict(momentum=0.20, unique_buyers=0.15, buy_sell=0.20, holder_growth=0.15,
                  liq_mcap=0.15, smart_wallets=0.15),  # intended weights (sum 1.0); if smart data unavailable -> renormalised over the other 5
     # Executor
-    start_equity=10_000.0, max_pos_frac=0.08, max_open=10, reentry_cooldown_h=6.0,
+    start_equity=10_000.0, max_pos_frac=0.05, max_open=10, reentry_cooldown_h=6.0,   # v6: 8% -> 5% of equity
+    max_liq_frac=0.0025,   # v6: size also capped at 0.25% of pool liquidity (modeled impact <= 0.5% per side)
     base_slippage=0.005, swap_fee=0.0025,  # + price impact = size / (liq/2)
     # Risk
-    stop_pct=0.06, trail_activate=0.12, trail_dist=0.06, risk_poll_s=30,
+    stop_pct=0.10, trail_activate=0.12, trail_dist=0.06, risk_poll_s=30,   # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
     # Loop
     scan_interval_s=180, rugcheck_cache_s=600,
     # Perf (no effect on rules): parallel I/O, background GeckoTerminal discovery, RPC cache for revoked mints
@@ -59,7 +60,9 @@ CFG = dict(
 SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the live trail, then 4% under the peak (live uses 6%)
 # v5 shadow-only candidates from the best-practice review (log only, never read by live code).
 SHADOW_ENTRY_V5 = dict(organic_50=50.0, churn_50=0.5, churn_max_age_h=24.0, m5_chase_10=10.0, top1_10=10.0)
-SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03), breakeven_8=dict(arm=0.08, lock_gain=0.01))
+SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03), breakeven_8=dict(arm=0.08, lock_gain=0.01),
+                      old_rules_v5=dict(stop=0.06, activate=0.12, dist=0.06, base="fill"))   # v6: what the pre-v6 exit rules would have done
+OLD_RULES_V5 = dict(min_liq=40_000, max_pos_frac=0.08, stop_pct=0.06, smart_zero_counts=True)   # pre-v6 live values, shadow reference only
 
 UA = {"User-Agent": "memedesk-paper/1.0", "Accept": "application/json"}
 BURN_ADDRS = {"1nc1nerator11111111111111111111111111111111", "11111111111111111111111111111111"}
@@ -769,7 +772,7 @@ class Filter:
         liq = c.liq_usd; v1 = (c.vol or {}).get("h1"); ch1 = (c.price_change or {}).get("h1")
         checks["liquidity_usd"] = liq; checks["vol_h1"] = v1; checks["price_change_h1"] = ch1
         if not liq: reasons.append("data unavailable: liquidity")
-        elif liq < CFG["min_liq"]: reasons.append(f"liquidity ${liq:,.0f} < $40k")
+        elif liq < CFG["min_liq"]: reasons.append(f"liquidity ${liq:,.0f} < ${CFG['min_liq'] / 1000:.0f}k")
         if v1 is None: reasons.append("data unavailable: 1h volume")
         elif v1 < CFG["min_vol_h1"]: reasons.append(f"1h volume ${v1:,.0f} < $50k")
         if ch1 is None: reasons.append("data unavailable: 1h price change")
@@ -949,9 +952,18 @@ class Analyst:
         except Exception as e: sv, sinfo = None, dict(status=f"error {e!r}: factor skipped, weights renormalised")
         comp["smart_wallets"] = sv; notes["smart_wallets"] = sinfo
         W = CFG["weights"]; tw = sum(w for k, w in W.items() if comp.get(k) is not None and w > 0)
-        score = round(sum(comp[k] * w for k, w in W.items() if comp.get(k) is not None and w > 0) / tw, 1)
+        score_old = round(sum(comp[k] * w for k, w in W.items() if comp.get(k) is not None and w > 0) / tw, 1)   # pre-v6 formula
+        # v6 (user-approved): the smart factor can only ADD. Base = the other 5 factors renormalised; each smart reading
+        # closes 15% x (smart/100) of the gap to 100: 0 wallets = base (no penalty), 1 -> +6.75% of the gap, 2 -> +11.25%,
+        # 3+ -> +15% (= exactly the old score for 3+ wallets). Never above 100.
+        bw = sum(w for k, w in W.items() if k != "smart_wallets" and comp.get(k) is not None and w > 0)
+        base = (sum(comp[k] * w for k, w in W.items() if k != "smart_wallets" and comp.get(k) is not None and w > 0) / bw) if bw else 0.0
+        sv_ = comp.get("smart_wallets")
+        score = round(base + (W["smart_wallets"] * (sv_ / 100.0) * (100.0 - base) if sv_ is not None else 0.0), 1) if bw else score_old
         components = {k: (None if v is None else round(v, 1)) for k, v in comp.items()}
-        components["_weights_effective"] = {k: round(w / tw, 3) for k, w in W.items() if w > 0}
+        components["_weights_effective"] = {k: round(w / bw, 3) for k, w in W.items() if w > 0 and k != "smart_wallets"} if bw else {}
+        components["_smart_rule"] = "v6: base(5 factors) + 0.15 * smart/100 * (100 - base)"
+        components["_score_old"] = score_old
         components["_inputs"] = notes
         passed = score >= CFG["pass_score"]
         self.log.score(c.mint, c.symbol, score, passed, components)
@@ -989,7 +1001,7 @@ class Executor:
             if not ref:
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["data unavailable: fresh price at entry"], {}); return None
             cash, eq = self.equity()
-            size = min(CFG["max_pos_frac"] * eq, cash)
+            size = min(CFG["max_pos_frac"] * eq, cash, CFG["max_liq_frac"] * liq)   # v6: also <= 0.25% of pool liquidity
             if size < 50:
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["insufficient paper cash"], dict(cash=cash)); return None
             slip = CFG["base_slippage"] + CFG["swap_fee"] + size / (liq / 2)
@@ -1004,7 +1016,7 @@ class Executor:
                            jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
             order = PaperOrder(mint=c.mint, symbol=c.symbol, pair_address=c.pair_address, ref_price=ref, fill_price=fill,
                                size_usd=round(size, 2), qty=size / fill, slippage_pct=round(slip * 100, 3),
-                               stop_price=fill * (1 - CFG["stop_pct"]), score=ap.score, equity_at_entry=round(eq, 2), created_at=now())
+                               stop_price=ref * (1 - CFG["stop_pct"]), score=ap.score, equity_at_entry=round(eq, 2), created_at=now())
             self.risk.open(order)   # stop is attached atomically with the order inside Risk.open
             return order
 
@@ -1014,7 +1026,7 @@ class Risk:
         self.log = log
         self._shadow_booted = False
         self._t4w = self._t4x = self._t4c = set()
-        self._v5 = {r: dict(w=set(), x=set(), c=set()) for r in SHADOW_EXIT_V5}; self._opened = {}
+        self._v5 = {r: dict(w=set(), x=set(), c=set()) for r in SHADOW_EXIT_V5}; self._opened = {}; self._refs = {}
         self._cw = self._cp = self._cx = self._cc = set()
         self._plocks, self._plocks_lock = {}, threading.Lock()
         self._last_write, self._src_state, self._pollb, self._post, self._ws_seen = {}, {}, {}, {}, {}
@@ -1029,7 +1041,7 @@ class Risk:
                 db.execute("""INSERT INTO positions(mint,symbol,pair,status,opened_ts,opened_iso,ref_price,entry_price,size_usd,qty,entry_slip_pct,
                     initial_stop,stop_price,peak_price,trail_active,last_price,last_ts,score) VALUES(?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
                     (o.mint, o.symbol, o.pair_address, o.created_at, iso(o.created_at), o.ref_price, o.fill_price, o.size_usd, o.qty,
-                     o.slippage_pct, o.stop_price, o.stop_price, o.fill_price, o.ref_price, now(), o.score))
+                     o.slippage_pct, o.stop_price, o.stop_price, o.ref_price, o.ref_price, now(), o.score))   # v6: peak starts at the market price
                 db.execute("UPDATE ledger SET v=v-? WHERE k='cash'", (o.size_usd,))
                 db.execute("COMMIT")
             except Exception:
@@ -1074,7 +1086,7 @@ class Risk:
         if not ep or not qty or not px: return
         try: self.shadow_v5_tick(pid, mint, sym, ep, qty, size, px, liq, peak, reuse)
         except Exception as e: self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, rule="v5_tick", error=repr(e))
-        act_lvl = ep * (1 + SHADOW_TRAIL4["activate"])
+        act_lvl = (self._ref(pid) or ep) * (1 + SHADOW_TRAIL4["activate"])   # v6: same market reference as the live trail
         trail_on = peak >= act_lvl
         shadow_stop = peak * (1 - SHADOW_TRAIL4["dist"]) if trail_on else None
 
@@ -1127,7 +1139,11 @@ class Risk:
             if pid not in st["w"]:
                 self._sev(rule, "WATCH", mint, sym, pid, entry_price=ep, peak=peak, **prm); st["w"].add(pid)
             if pid in st["x"]: continue
-            if rule == "time_stop_60m":
+            if rule == "old_rules_v5":   # pre-v6 exits: -6% from the fill, trail from fill*1.12, 6% under the peak
+                old_stop = ep * (1 - prm["stop"])
+                if peak >= ep * (1 + prm["activate"]): old_stop = max(old_stop, peak * (1 - prm["dist"]))
+                hit = px <= old_stop; why = dict(old_stop=old_stop)
+            elif rule == "time_stop_60m":
                 age_min = (now() - self._opened_ts(pid)) / 60
                 hit = age_min >= prm["minutes"] and px < ep * (1 + prm["min_gain"]); why = dict(age_min=round(age_min, 1))
             else:
@@ -1201,7 +1217,7 @@ class Risk:
                 self.shadow_compare_close(pid, mint, sym, qty, size, pnl, pct, reason, xp)
 
     # ---- v4: live exit evaluation shared by the 30 s DexScreener poll and the Helius real-time feed.
-    # Rule levels are unchanged (stop -6%, trail activates at +12%, 6% under the peak). Only the price
+    # v6 levels: stop -10% from the market price at entry, trail activates at +12% over it, 6% under the peak. Only the price
     # source / timing differs: Helius pool reserves when the feed is healthy, else the DexScreener poll.
     def _plock(self, pid):
         with self._plocks_lock: return self._plocks.setdefault(pid, threading.Lock())
@@ -1209,6 +1225,13 @@ class Risk:
         with self.log.lock:
             return self.log.db.execute("SELECT id,mint,symbol,pair,entry_price,qty,size_usd,stop_price,peak_price,trail_active,initial_stop "
                                        "FROM positions WHERE id=? AND status='OPEN'", (pid,)).fetchone()
+    def _ref(self, pid):
+        """Market (DexScreener) price at entry: v6 reference for the stop and the trailing activation."""
+        if pid not in self._refs:
+            with self.log.lock:
+                r = self.log.db.execute("SELECT ref_price,entry_price FROM positions WHERE id=?", (pid,)).fetchone()
+            self._refs[pid] = (r[0] or r[1]) if r else None
+        return self._refs[pid]
     def apply_price(self, pid, px, liq, src, trig=None):
         """Evaluate the live rules for one OPEN position at price `px` from `src`. Returns True if it closed it."""
         with self._plock(pid):
@@ -1216,7 +1239,7 @@ class Risk:
             if not r or not px: return False
             pid, mint, sym, pair, ep, qty, size, stop, peak, trail, istop = r
             new_peak = max(peak, px)
-            new_trail = bool(trail) or new_peak >= ep * (1 + CFG["trail_activate"])
+            new_trail = bool(trail) or new_peak >= (self._ref(pid) or ep) * (1 + CFG["trail_activate"])
             new_stop = stop
             if new_trail: new_stop = max(stop, new_peak * (1 - CFG["trail_dist"]))
             if new_trail and not trail:
@@ -1230,7 +1253,7 @@ class Risk:
                                quoted_slip_pct=(round(100 * (1 - q["price"] / px), 3) if q else None),
                                jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
                 proceeds = exit_px * qty; pnl = proceeds - size
-                reason = "trailing stop" if new_trail else "stop-loss -6%"
+                reason = "trailing stop" if new_trail else f"stop-loss -{100 * CFG['stop_pct']:.0f}%"
                 with self.log.lock:
                     db = self.log.db; db.execute("BEGIN IMMEDIATE")
                     try:   # same all-or-nothing pattern as Risk.open: a failed write must never leave the shared connection mid-transaction
@@ -1747,6 +1770,9 @@ class Desk:
                           f"young coin (<= {E['churn_max_age_h']:.0f}h) with 24h volume < {E['churn_50']:.0%} of mcap (supply not changing hands)"),
                 m5_chase_10=(m5, None if m5 is None else m5 > E["m5_chase_10"], f"buying after > +{E['m5_chase_10']:.0f}% in 5 min (chasing)"),
                 top1_10=(top1, None if top1 is None else top1 > E["top1_10"], f"largest non-pool holder > {E['top1_10']:.0f}%"))
+            so = ap.components.get("_score_old")
+            gates["old_rules_v5"] = (so, None if so is None else so < CFG["pass_score"],
+                                     f"pre-v6 score (smart 0 counted as 0) < {CFG['pass_score']:.0f}; old size 8% of equity, no liquidity cap")
             for rule, (val, blk, why) in gates.items():
                 SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, rule, "ENTRY_GATE", c.mint, c.symbol, pid,
                                  cycle=self.log.cycle, score=ap.score, value=val, would_block=blk, entered=bool(order), rule_text=why)

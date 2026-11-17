@@ -192,10 +192,10 @@ def shadow_event(db, lock, jsonl, rule, kind, mint=None, symbol=None, position_i
                                         position_id=position_id, **data), default=str) + "\n")
 
 # ---------------------------------------------------------------- Skeptic (shadow pre-entry checklist, deterministic)
-SKEPTIC = dict(min_rr=1.5, stop_pct=0.06, min_liq_mcap=0.05, max_ext_from_6h_low=1.40, max_h1=40.0, ohlcv_cache_s=600)
+SKEPTIC = dict(min_rr=1.5, stop_pct=0.10, min_liq_mcap=0.05, max_ext_from_6h_low=1.40, max_h1=40.0, ohlcv_cache_s=600)
 _ohlcv = {}
 def skeptic(get, c):
-    """Would a sceptical trader take this entry? Risk = the desk's -6% stop; reward = distance to the 24h swing high.
+    """Would a sceptical trader take this entry? Risk = the desk's -10% stop (v6); reward = distance to the 24h swing high.
     Returns dict(would_block, fails, checks). Log only."""
     pair, price = c.pair_address, float(c.price_usd or 0)
     hit = _ohlcv.get(pair)
@@ -213,7 +213,7 @@ def skeptic(get, c):
         rr = reward / SKEPTIC["stop_pct"]
         checks.update(swing_high_24h=swing_high, reward_to_high_pct=round(100 * reward, 2), rr=round(rr, 2),
                       ext_vs_6h_low=(round(price / low6, 2) if low6 else None))
-        if rr < SKEPTIC["min_rr"]: fails.append(f"R:R {rr:.2f} < {SKEPTIC['min_rr']} (target = 24h high, {100*reward:.1f}% away, stop -6%)")
+        if rr < SKEPTIC["min_rr"]: fails.append(f"R:R {rr:.2f} < {SKEPTIC['min_rr']} (target = 24h high, {100*reward:.1f}% away, stop -{100*SKEPTIC['stop_pct']:.0f}%)")
         if low6 and price / low6 > SKEPTIC["max_ext_from_6h_low"]: fails.append(f"extended: {price/low6:.2f}x the 6h low")
     else:
         checks["ohlcv"] = "unavailable"

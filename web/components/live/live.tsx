@@ -151,8 +151,8 @@ export const AGENTS: Record<string, AgentDef> = {
   Scout: { key: "Scout", name: "Scout", desc: "pair 30m–72h · $300k–$20M", color: "#F97316", icon: <Radar className="size-4" /> },
   Filter: { key: "Filter", name: "Filter", desc: "mint, LP, holder, bundle", color: "#3B82F6", icon: <ShieldCheck className="size-4" /> },
   Analyst: { key: "Analyst", name: "Analyst", desc: "score 0–100 · passa ≥ 70", color: "#14B8A6", icon: <Brain className="size-4" /> },
-  Executor: { key: "Executor", name: "Executor", desc: "max 8% per trade", color: "#8B5CF6", icon: <Wallet className="size-4" /> },
-  Risk: { key: "Risk", name: "Risk", desc: "stop −6% · trailing +12%", color: "#EC4899", icon: <ShieldHalf className="size-4" /> },
+  Executor: { key: "Executor", name: "Executor", desc: "max 5% per trade", color: "#8B5CF6", icon: <Wallet className="size-4" /> },
+  Risk: { key: "Risk", name: "Risk", desc: "stop −10% · trailing +12%", color: "#EC4899", icon: <ShieldHalf className="size-4" /> },
   Logger: { key: "Logger", name: "Logger", desc: "ogni kill registrato", color: "#64748B", icon: <ScrollText className="size-4" /> },
 };
 
@@ -314,7 +314,7 @@ export function toastFromTrade(t: Trade): Toast | null {
   const d = (t.data ?? {}) as Record<string, unknown>;
   if (t.kind === "ENTRY") {
     const o = (d.order ?? {}) as Record<string, number>;
-    return { id: t.id, kind: "ENTRY", symbol: t.symbol, title: `Executor ha comprato $${t.symbol}`, sub: `${money(o.size_usd ?? 0, 0)} · stop −6% · score ${o.score ?? "—"}`, amount: null };
+    return { id: t.id, kind: "ENTRY", symbol: t.symbol, title: `Executor ha comprato $${t.symbol}`, sub: `${money(o.size_usd ?? 0, 0)} · stop −10% · score ${o.score ?? "—"}`, amount: null };
   }
   if (t.kind === "EXIT") {
     const p = Number(d.pnl_usd ?? 0);
