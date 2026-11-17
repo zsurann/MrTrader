@@ -1,0 +1,14 @@
+[Unit]
+Description=Retry Always Free A1.Flex every 5 minutes (with jitter)
+
+[Timer]
+OnBootSec=2min
+OnActiveSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=90
+AccuracySec=30s
+Persistent=true
+Unit=memedesk-a1grab.service
+
+[Install]
+WantedBy=timers.target

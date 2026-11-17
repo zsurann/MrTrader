@@ -157,6 +157,23 @@ La mitigazione è attiva: `memedesk-keepalive.service` tiene un carico continuo 
 
 In misura, `oci_computeagent` (plugin `gomon`) resta intorno al 40-50%, ben sopra il 20%. La serie hypervisor `oci_vmi_resource_utilization`, dopo l'esaurimento dell'extra, si ferma a circa 12,5%. I cicli puliti del desk non sono diventati più lenti. Le regole di trading non cambiano. Nessuna routine di Grok Bot.
 
+
+## Tentativi automatici per una A1 Always Free (2026-11-17, Europe/Rome)
+
+Un timer systemd su questa E2.1.Micro riprova ogni 5 minuti (con un jitter fino a 90 s) a creare un'istanza Always Free `VM.Standard.A1.Flex` (2 OCPU, 12 GB, Ubuntu 24.04 aarch64, boot da 50 GB, IPv4 pubblico) in `eu-milan-1`, sulla VCN/subnet già usata da questa VM e con la stessa chiave SSH (`~/.ssh/oci_memedesk`).
+
+Non sposta il desk. Quando l'istanza è pronta invia un messaggio Telegram con l'IP pubblico tramite `@sasowlbot` e disattiva il proprio timer. "Out of host capacity" è la risposta attesa a Milano e viene ritentata. Un 429 fa fare backoff (15 min, poi il doppio fino a 2 h). Una risposta che sembra un limite a pagamento o un upgrade ferma il timer e avvisa; il tenancy non viene mai passato a Pay As You Go. Lo script resta entro 2 OCPU / 12 GB / 50 GB anche se il Free Trial mostra quote A1 più alte: quelle quote extra non vengono usate, così il lancio resta nell'allowance Always Free.
+
+Implementazione: uno script Python piccolo che firma le API REST di OCI con la libreria standard e `python3-cryptography` (già presente). La CLI OCI non è installata su questa VM da 1 GB. Le credenziali stanno solo sulla VM in `/etc/memedesk/oci/` (mode 700/600). Il codice è in `a1grab/`.
+
+Stop:
+
+```bash
+sudo systemctl disable --now memedesk-a1grab.timer
+```
+
+Log: `journalctl -u memedesk-a1grab.service -n 50 --no-pager` oppure `sudo tail -50 /var/lib/memedesk/a1grab.log`.
+
 ## Migrazione verso un'altra VM
 
 La copia live dello stato è sulla VM di origine, non su un computer di sviluppo.

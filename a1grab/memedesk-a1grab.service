@@ -1,0 +1,19 @@
+[Unit]
+Description=Retry Always Free A1.Flex (2 OCPU / 12 GB) in eu-milan-1
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Nice=19
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Cap memory so a leak cannot squeeze the 1 GB desk VM.
+MemoryMax=80M
+Environment=TZ=Europe/Rome
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/memedesk/a1grab/grab_a1.py
+
+[Install]
+WantedBy=multi-user.target
