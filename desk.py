@@ -40,7 +40,7 @@ CFG = dict(
     # Loop
     scan_interval_s=180, rugcheck_cache_s=600,
     # Perf (no effect on rules): parallel I/O, background GeckoTerminal discovery, RPC cache for revoked mints
-    http_workers=6, filter_workers=4, gt_refresh_s=180, rpc_revoked_cache_s=3600,
+    http_workers=6, filter_workers=4, gt_refresh_s=420, rpc_revoked_cache_s=3600,
     old_mint_cache_s=1800,  # skip re-pricing mints already killed as pair-too-old; TTL so a new pair is still seen
     hard_filter_cache_s=1800,  # skip RugCheck for permanent hard kills (rugged / past rugs / transfer fee / permanent delegate)
     jsonl_rotate_bytes=15 * 1024 * 1024,
@@ -48,7 +48,10 @@ CFG = dict(
     jup_list_ttl={"5m": 90, "1h": 210, "6h": 540, "24h": 780},  # staggered so list refreshes do not pile up
     jup_search_cache_s=45,   # only long enough to dedupe decimals+analyst in the same cycle
     jup_quote_cache_s=8,     # shadow/live reuse of the same paper quote
-    gt_page_cache_s=180,     # shared with smartwallets; aligned with scan_interval_s
+    gt_page_cache_s=420,     # shared with smartwallets; = gt_refresh_s (GT public API: ~10/min documented, ~5/min observed)
+    # v3 (no effect on rules): background Jupiter list refresher, shadow fast-stop watcher, PumpPortal shadow discovery
+    fast_stop_poll_s=10,     # SHADOW ONLY: Jupiter price/v3 poll of open positions (log only, never closes a trade)
+    pumpportal_ws=True,      # SHADOW ONLY: free PumpPortal migration stream, logged and measured, NOT added to Scout
 )
 # Shadow-only exit variants. Log only: never read by live Executor/Risk. Do not put these in CFG.
 SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the live trail, then 4% under the peak (live uses 6%)
@@ -68,10 +71,16 @@ class Http:
     # Gaps are minimum seconds between *process-wide* calls. lite-api.jup.ag ~1 RPS free; GT ~30 req/min;
     # api.jup.ag free key = 1 RPS; Helius free = 10 RPS; DexScreener is generous.
     # Tuned for the Oracle E2.1.Micro (free-tier caps, shared desk+smartwallets limiter).
-    BASE_GAP = {"api.dexscreener.com": 0.22, "api.rugcheck.xyz": 1.2, "api.geckoterminal.com": 2.8,
-                "api.mainnet-beta.solana.com": 0.7, "lite-api.jup.ag": 1.25, "api.jup.ag": 1.25,
+    # v3 (measured 2026-11-17 on the Oracle IP): GT public docs say ~10 calls/min (keyless doc: ~5/min, dynamic);
+    # we still got 429s at ~9 s spacing, so the base is 12.5 s (~4.8/min).
+    # Jupiter: lite-api.jup.ag and api.jup.ag (even with our key) share ONE per-IP sliding window of
+    # 5 requests / 10 s (x-ratelimit headers) -> one rate group "jup" at 2.05s.
+    BASE_GAP = {"api.dexscreener.com": 0.22, "api.rugcheck.xyz": 1.2, "api.geckoterminal.com": 12.5,
+                "api.mainnet-beta.solana.com": 0.7, "jup": 2.05,
                 "mainnet.helius-rpc.com": 0.12}
-    MIN_429_WAIT = {"api.geckoterminal.com": 12.0, "lite-api.jup.ag": 6.0, "api.jup.ag": 6.0,
+    RATE_GROUP = {"lite-api.jup.ag": "jup", "api.jup.ag": "jup"}
+    PRIO_GAP = {"api.geckoterminal.com": 6.2}   # Analyst lookups during the gated Filter/Analyst phase
+    MIN_429_WAIT = {"api.geckoterminal.com": 12.0, "jup": 4.0,
                     "api.mainnet-beta.solana.com": 4.0}
     POOL_MAX = 6
     RATE_DIR = os.path.join(DATA, ".api_rate")
@@ -134,7 +143,7 @@ class Http:
                     last = max(last, float(parts[0]))
                     if len(parts) > 1:
                         gap = float(parts[1]); self.gap[host] = gap
-                use = base if prio else max(gap, base)
+                use = self.PRIO_GAP.get(host, base) if prio else max(gap, base)
                 wait = last + use - now()
                 if wait > 0:
                     time.sleep(wait + random.uniform(0, min(0.08, use * 0.15)))
@@ -160,8 +169,7 @@ class Http:
             self._write_rate(host, self.last.get(host, now()), self.gap[host])
     def _slow(self, host):
         base = self.BASE_GAP.get(host, 0.5)
-        self.gap[host] = min(base * 4, self.gap.get(host, base) * 1.6)
-        self.stats[host + ":429"] = self.stats.get(host + ":429", 0) + 1
+        self.gap[host] = min(base * 3, self.gap.get(host, base) * 1.5)
         self._write_rate(host, now(), self.gap[host])
     def _hit(self, key, n=1):
         self.stats[key] = self.stats.get(key, 0) + n
@@ -245,7 +253,7 @@ class Http:
                  http.client.RemoteDisconnected, http.client.CannotSendRequest, OSError)
         i = 0
         while i < tries:
-            self._throttle(host, priority=priority)
+            self._throttle(self.RATE_GROUP.get(host, host), priority=priority)
             conn = None
             try:
                 conn = self._checkout(host, timeout=25)
@@ -259,17 +267,21 @@ class Http:
                 conn = None
                 if 200 <= code < 300:
                     out = json.loads(raw.decode()) if raw else {}
-                    self._ok(host); self._hit(host)
+                    self._ok(self.RATE_GROUP.get(host, host)); self._hit(host)
                     if cache_s and body is None and out is not None:
                         self._cache_put(self._cache_key(url, None), out)
                     return out
                 if code == 404:
                     return None
                 if code in (429, 500, 502, 503, 504):
-                    if code == 429: self._slow(host)
+                    grp = self.RATE_GROUP.get(host, host)
+                    if code == 429: self._slow(grp); self._hit(host + ":429")
                     ra = resp.getheader("Retry-After") if resp else None
                     extra = float(ra) if ra and str(ra).replace(".", "", 1).isdigit() else delay
-                    extra = max(extra, self.MIN_429_WAIT.get(host, 0))
+                    rs = resp.getheader("x-ratelimit-reset") if resp else None   # Jupiter: unix ts when a slot frees
+                    if code == 429 and rs and str(rs).isdigit():
+                        extra = max(extra, min(15.0, float(rs) - now() + 0.3))
+                    extra = max(extra, self.MIN_429_WAIT.get(grp, 0))
                     time.sleep(extra + random.random() * 0.4)
                     delay = min(delay * 2, 60); i += 1; continue
                 return None
@@ -306,6 +318,12 @@ class Http:
         with ThreadPoolExecutor(max_workers=min(workers or CFG["http_workers"], len(items))) as ex:
             return list(ex.map(fn, items))
 HTTP = Http()
+# v3: set while the cycle's Filter/Analyst phase runs. Background GeckoTerminal users (discovery sweep,
+# shadow Skeptic) wait for it to clear so the Analyst's GT trades lookup never queues behind them.
+CRITICAL = threading.Event()
+def wait_not_critical(max_s=240):
+    t0 = time.time()
+    while CRITICAL.is_set() and time.time() - t0 < max_s: time.sleep(0.5)
 
 def helius_rpc_url():
     """Helius JSON-RPC URL. The key is only in the query string and is never logged."""
@@ -538,11 +556,31 @@ class Scout:
         self.log = log
         self.gt = None; self.gt_ts = 0.0; self.gt_ready = threading.Event()
         self.old_mints = {}  # mint -> (cached_at, pairCreatedAt, sym, pair, reasons, metrics)
+        ttl = CFG.get("jup_list_ttl") or {"5m": 90, "1h": 180, "6h": 480, "24h": 600}
+        self.jup_jobs = [(f"https://lite-api.jup.ag/tokens/v2/{cat}/{iv}?limit=100", "jup_" + cat, int(ttl.get(iv, 120)))
+                         for cat in ("toptrending", "toptraded", "toporganicscore") for iv in ("5m", "1h", "6h", "24h")]
+        self.jup_lists = {}; self.jup_ready = threading.Event()
         threading.Thread(target=self._gt_loop, daemon=True, name="gt-discovery").start()
+        threading.Thread(target=self._jup_loop, daemon=True, name="jup-discovery").start()
+        self.pp = PumpPortalShadow(log) if CFG.get("pumpportal_ws") else None
+
+    def _jup_loop(self):
+        """v3: Jupiter discovery lists refreshed in the background at the shared 'jup' pace, so the cycle never
+        waits on the 0.5 RPS Jupiter window. Same URLs and TTLs as before (HTTP.get serves fresh cache hits)."""
+        while True:
+            try:
+                for url, s, ttl in self.jup_jobs:
+                    d = HTTP.get(url, cache_s=ttl, tries=3)
+                    if d is not None: self.jup_lists[url] = (now(), d, ttl)
+                self.jup_ready.set()
+            except Exception as e:
+                self.log.event("Scout", "JUP_ERROR", error=repr(e))
+            time.sleep(10)
 
     def _gt_sweep(self):
         found = {}
-        for path in self.GT_PATHS:   # sequential on purpose: GT allows ~30 req/min
+        for path in self.GT_PATHS:   # sequential on purpose: GT public API is ~5-10 req/min
+            wait_not_critical()
             d = HTTP.get(f"https://api.geckoterminal.com/api/v2/networks/solana/{path}",
                          cache_s=CFG.get("gt_page_cache_s") or 150) or {}
             for p in d.get("data") or []:
@@ -567,10 +605,11 @@ class Scout:
                     ("token-profiles/latest/v1", "ds_profiles"), ("token-boosts/latest/v1", "ds_boosts_latest"),
                     ("token-boosts/top/v1", "ds_boosts_top"), ("community-takeovers/latest/v1", "ds_cto")]]
         jobs += [("ds_search", f"https://api.dexscreener.com/latest/dex/search?q={q}", "ds_search", 0) for q in self.SEARCH_TERMS]
-        ttl = CFG.get("jup_list_ttl") or {"5m": 90, "1h": 180, "6h": 480, "24h": 600}
-        jobs += [("jup", f"https://lite-api.jup.ag/tokens/v2/{cat}/{iv}?limit=100", "jup_" + cat, int(ttl.get(iv, 120)))
-                 for cat in ("toptrending", "toptraded", "toporganicscore") for iv in ("5m", "1h", "6h", "24h")]
         results = HTTP.map(lambda j: HTTP.get(j[1], cache_s=j[3]), jobs)
+        self.jup_ready.wait(timeout=45)   # only the very first cycle after a restart can wait here
+        jobs += [("jup", url, s, ttl) for url, s, ttl in self.jup_jobs]
+        # a list whose refresh keeps failing is dropped after 3x its TTL (as before: a failed list is simply missing)
+        results += [(lambda h: h[1] if h and now() - h[0] < 3 * h[2] else None)(self.jup_lists.get(url)) for url, s, ttl in self.jup_jobs]
         for j, d in zip(jobs, results):   # merged in the same order as the sequential version
             kind, _, s = j[0], j[1], j[2]
             if kind == "ds_search":
@@ -649,6 +688,9 @@ class Scout:
         for m in list(self.old_mints):
             if m not in live: self.old_mints.pop(m, None)
         self.log.kill_many("Scout", kill_rows)
+        if self.pp:
+            try: self.pp.measure(set(mints))
+            except Exception as e: self.log.event("Shadow", "ERROR", rule="pp_discovery", error=repr(e))
         self.log.event("Scout", "SCOUT_DONE", discovered=len(mints), priced=len(best), priced_cached=len(cached_rows),
                        in_window=len(out), killed=scout_kills, gt_age_s=getattr(self, "gt_age_s", None))
         return out, dict(discovered=len(mints), priced=len(best), priced_cached=len(cached_rows),
@@ -854,7 +896,7 @@ class Analyst:
         s = 50 + 1.5 * clamp(m5, -15, 15) + 0.6 * clamp(h1, -40, 50) + 0.15 * clamp(h6, -100, 150)
         if m5 < -5 and h1 < 0: s -= 15
         comp["momentum"] = clamp(s); notes["momentum"] = dict(m5=m5, h1=h1, h6=h6)
-        jd = HTTP.get(f"https://lite-api.jup.ag/tokens/v2/search?query={c.mint}", cache_s=CFG.get("jup_search_cache_s") or 45) or []
+        jd = HTTP.get(f"https://lite-api.jup.ag/tokens/v2/search?query={c.mint}", cache_s=CFG.get("jup_search_cache_s") or 45, priority=True) or []
         jt = next((t for t in jd if isinstance(jd, list) and t.get("id") == c.mint), {}) if isinstance(jd, list) else {}
         j1 = jt.get("stats1h") or {}
         b1 = ((tx.get("h1") or {}).get("buys") or 0); s1 = ((tx.get("h1") or {}).get("sells") or 0)
@@ -894,7 +936,7 @@ class Analyst:
         comp["liq_mcap"] = clamp(500 * lm); notes["liq_mcap"] = round(lm, 4)
         # smart wallets: distinct tracked smart wallets (free on-chain list, see smartwallets.py) that bought recently
         # 0 -> 0, 1 -> 45, 2 -> 75, 3+ -> 100. Lookup failure / list too small -> None -> renormalised (never penalises)
-        try: sv, sinfo = self.smart.factor(lambda u: HTTP.get(u, tries=2), c.mint, c.pair_address)
+        try: sv, sinfo = self.smart.factor(lambda u, **kw: HTTP.get(u, tries=2, priority=True, **kw), c.mint, c.pair_address)
         except Exception as e: sv, sinfo = None, dict(status=f"error {e!r}: factor skipped, weights renormalised")
         comp["smart_wallets"] = sv; notes["smart_wallets"] = sinfo
         W = CFG["weights"]; tw = sum(w for k, w in W.items() if comp.get(k) is not None and w > 0)
@@ -1162,12 +1204,109 @@ class Risk:
                         self.log.db.execute("UPDATE positions SET last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=? WHERE id=?",
                                             (px, now(), new_peak, new_stop, int(new_trail), pid))
 
+# ---------------------------------------------------------------- v3 shadow-only observers (never trade)
+class FastStopShadow:
+    """SHADOW ONLY. Polls Jupiter price/v3 (one batched call, <=50 mints) for OPEN positions every
+    fast_stop_poll_s and logs when the price first crosses the position's *current live* stop. On close it
+    logs how much earlier / at what price a faster feed would have seen the breach versus the live
+    30 s DexScreener poll. Reads positions; never writes them."""
+    def __init__(self, log):
+        self.log = log; self.seen = {}   # pid -> dict(first breach)
+    def _ev(self, kind, mint, sym, pid, **d):
+        SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, "fast_stop", kind, mint, sym, pid, cycle=self.log.cycle, **d)
+    def tick(self):
+        with self.log.lock:
+            rows = self.log.db.execute("SELECT id,mint,symbol,stop_price,last_price,entry_price FROM positions WHERE status='OPEN'").fetchall()
+        open_ids = {r[0] for r in rows}
+        for pid in [p for p in self.seen if p not in open_ids]:   # closed since last tick -> compare once
+            b = self.seen.pop(pid)
+            with self.log.lock:
+                r = self.log.db.execute("SELECT closed_ts,exit_ref,exit_reason,pnl_pct FROM positions WHERE id=?", (pid,)).fetchone()
+            if r and b.get("breach_ts"):
+                self._ev("COMPARE", b["mint"], b["sym"], pid, breach_ts=iso(b["breach_ts"]), breach_px=b["breach_px"],
+                         stop=b["stop"], live_exit_ts=iso(r[0]) if r[0] else None, live_exit_ref=r[1], live_reason=r[2],
+                         live_pnl_pct=r[3], seconds_earlier=(round(r[0] - b["breach_ts"], 1) if r[0] else None),
+                         px_vs_live_ref_pct=(round(100 * (b["breach_px"] / r[1] - 1), 3) if r[1] else None))
+        if not rows: return
+        d = HTTP.get("https://lite-api.jup.ag/price/v3?ids=" + ",".join(sorted({r[1] for r in rows})), tries=1) or {}
+        for pid, mint, sym, stop, last, ep in rows:
+            px = ((d.get(mint) or {}).get("usdPrice")) if isinstance(d, dict) else None
+            st = self.seen.setdefault(pid, dict(mint=mint, sym=sym, breach_ts=None, n=0, dev=[]))
+            if not px: continue
+            px = float(px); st["n"] += 1
+            if last: st["dev"] = (st["dev"] + [round(100 * (px / last - 1), 2)])[-20:]   # Jupiter vs DexScreener mark
+            if st["breach_ts"] is None and stop and px <= stop:
+                st.update(breach_ts=now(), breach_px=px, stop=stop)
+                self._ev("BREACH", mint, sym, pid, jup_px=px, stop=stop, ds_last=last, entry=ep,
+                         jup_vs_ds_pct_recent=st["dev"][-5:], note="log only: live Risk still exits on its 30s DexScreener poll")
+    def loop(self):
+        while True:
+            try: self.tick()
+            except Exception as e: self.log.event("Shadow", "ERROR", rule="fast_stop", error=repr(e))
+            time.sleep(CFG.get("fast_stop_poll_s") or 10)
+
+class PumpPortalShadow:
+    """SHADOW ONLY. Free PumpPortal WebSocket (wss://pumpportal.fun/api/data, subscribeMigration, no key):
+    pump.fun -> PumpSwap migrations are stored in pp_migrations. Each Scout cycle logs how many recent
+    migrated mints the current discovery set does NOT already see, and (one DexScreener batch) how many of
+    those would sit inside the Scout window. Nothing is added to the live candidate list."""
+    URL = "wss://pumpportal.fun/api/data"
+    def __init__(self, log):
+        self.log = log; self.connected = False; self.msgs = 0; self.last_measure = 0.0
+        with log.lock:
+            log.db.execute("CREATE TABLE IF NOT EXISTS pp_migrations(mint TEXT PRIMARY KEY, ts REAL, pool TEXT, sig TEXT)")
+    def loop(self):
+        import wsmini
+        backoff = 5
+        while True:
+            ws = None
+            try:
+                ws = wsmini.WS(self.URL, timeout=120)
+                ws.send({"method": "subscribeMigration"})
+                self.connected = True; backoff = 5
+                while True:
+                    m = json.loads(ws.recv()); self.msgs += 1
+                    if m.get("txType") == "migrate" and m.get("mint"):
+                        with self.log.lock:
+                            self.log.db.execute("INSERT OR IGNORE INTO pp_migrations(mint,ts,pool,sig) VALUES(?,?,?,?)",
+                                                (m["mint"], now(), m.get("pool"), m.get("signature")))
+            except Exception as e:
+                self.connected = False
+                self.log.event("Shadow", "PP_WS_RECONNECT", rule="pp_discovery", error=repr(e)[:200], backoff_s=backoff)
+            finally:
+                if ws: ws.close()
+            time.sleep(backoff); backoff = min(backoff * 2, 600)   # one connection only; never hammer (ban risk)
+    def measure(self, discovered):
+        if now() - self.last_measure < 600: return   # every 10 min is plenty for a shadow statistic
+        self.last_measure = now()
+        lo, hi = now() - CFG["max_age_h"] * 3600, now() - CFG["min_age_h"] * 3600
+        with self.log.lock:
+            rows = [r[0] for r in self.log.db.execute("SELECT mint FROM pp_migrations WHERE ts>? ORDER BY ts DESC", (now() - 86400,))]
+        unseen = [m for m in rows if m not in discovered]
+        in_window = []
+        if unseen:
+            d = HTTP.get("https://api.dexscreener.com/tokens/v1/solana/" + ",".join(unseen[:30])) or []
+            best = {}
+            for p in d if isinstance(d, list) else []:
+                m = (p.get("baseToken") or {}).get("address")
+                if m and ((p.get("liquidity") or {}).get("usd") or 0) >= ((best.get(m, {}).get("liquidity") or {}).get("usd") or 0): best[m] = p
+            for m, p in best.items():
+                c, mc = (p.get("pairCreatedAt") or 0) / 1000, p.get("marketCap") or p.get("fdv") or 0
+                if c and lo <= c <= hi and CFG["min_mcap"] <= mc <= CFG["max_mcap"]:
+                    in_window.append((p["baseToken"].get("symbol"), round(mc)))
+        SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, "pp_discovery", "MEASURE", None, None, None,
+                         cycle=self.log.cycle, ws_connected=self.connected, ws_msgs=self.msgs, migrations_24h=len(rows),
+                         unseen_by_scout=len(unseen), unseen_checked=min(30, len(unseen)), unseen_in_scout_window=len(in_window),
+                         sample=in_window[:8], note="log only: not added to live discovery")
+
     # ---------------------------------------------------------------- Orchestrator
 class Desk:
     def __init__(self):
         self.log = Logger(); self.scout = Scout(self.log); self.filter = Filter(self.log)
         self.analyst = Analyst(self.log); self.risk = Risk(self.log); self.exec = Executor(self.log, self.risk)
         self.stop = threading.Event()
+        self.shadow_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="shadow")
+        self.fast = FastStopShadow(self.log)
     def risk_loop(self):
         while not self.stop.is_set():
             try: self.risk.poll()
@@ -1187,9 +1326,16 @@ class Desk:
                              cycle=self.log.cycle, score=ap.score, smart_count=n, smart_factor=ap.components.get("smart_wallets"),
                              would_block=(None if n is None else n < 2), entered=bool(order),
                              note=None if n is not None else "smart data unavailable -> rule undecidable")
-            sk = SWL.skeptic(lambda u: HTTP.get(u, tries=2), c)   # shadow 'Skeptic' checklist, log only
-            SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, "skeptic", "ENTRY_GATE", c.mint, c.symbol, pid,
-                             cycle=self.log.cycle, score=ap.score, entered=bool(order), **sk)
+            cyc = self.log.cycle
+            def _sk():   # v3: shadow 'Skeptic' checklist (GT OHLCV) runs off the cycle's critical path; log only
+                try:
+                    wait_not_critical()
+                    sk = SWL.skeptic(lambda u: HTTP.get(u, tries=2), c)
+                    SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, "skeptic", "ENTRY_GATE", c.mint, c.symbol, pid,
+                                     cycle=cyc, score=ap.score, entered=bool(order), **sk)
+                except Exception as e:
+                    self.log.event("Shadow", "ERROR", rule="skeptic", error=repr(e))
+            self.shadow_pool.submit(_sk)
         except Exception as e:
             self.log.event("Shadow", "ERROR", error=repr(e))
     def cycle(self):
@@ -1213,7 +1359,7 @@ class Desk:
         def fa(c):   # Filter -> Analyst handoff for one coin (independent per coin, I/O bound)
             fp = self.filter.run(c)
             return fp, (self.analyst.run(fp) if fp else None)
-        t_fa = now()
+        t_fa = now(); CRITICAL.set()
         for fp, ap in HTTP.map(fa, alive, workers=CFG["filter_workers"]):
             if not fp: continue
             fpass += 1
@@ -1222,7 +1368,7 @@ class Desk:
             order = self.exec.run(ap)
             if order: entries += 1
             self.shadow_entry_gate(ap, order)
-        fa_s = now() - t_fa
+        CRITICAL.clear(); fa_s = now() - t_fa
         cash, eq = self.exec.equity()
         http1 = HTTP.snapshot()
         http_delta = {k: http1.get(k, 0) - http0.get(k, 0) for k in http1 if http1.get(k, 0) != http0.get(k, 0)}
@@ -1235,10 +1381,13 @@ class Desk:
         if once:   # test mode: a single cycle, no risk thread
             self.cycle(); print("http", HTTP.stats, flush=True); return
         threading.Thread(target=self.risk_loop, daemon=True).start()
+        threading.Thread(target=self.fast.loop, daemon=True, name="fast-stop-shadow").start()
+        if self.scout.pp: threading.Thread(target=self.scout.pp.loop, daemon=True, name="pumpportal-shadow").start()
         while True:
             t0 = now()
             try: self.cycle()
             except Exception as e:
+                CRITICAL.clear()
                 self.log.event("Logger", "CYCLE_ERROR", error=repr(e), tb=traceback.format_exc()[-1500:])
                 print(iso(), "cycle error", repr(e), flush=True)
             time.sleep(max(30, CFG["scan_interval_s"] - (now() - t0)))

@@ -46,6 +46,40 @@ VM=user@host KEY=/path/to/ssh_key ./vm_status.sh
 
 In console Oracle non usare Terminate: cancellerebbe la VM. Stop e Reboot fermano il desk.
 
+## Fonti dati e limiti API (v3, 2026-11-17)
+
+Solo paper. Le regole live non cambiano (stop −6%, trailing +12%/6%, 8% per trade, punteggio 70+). Le novità sono solo shadow (solo log).
+
+Perché GeckoTerminal rallentava il desk:
+
+- L'API pubblica di GeckoTerminal è documentata a circa 10 chiamate/minuto (la pagina keyless parla di circa 5/minuto, variabile, con un pool condiviso per IP). Il desk andava a 2,8 s tra chiamate (21/minuto) con tre utenti: scoperta del desk (17 pagine ogni 3 minuti), smartwallets (22 pagine per aggiornamento), Analyst e Skeptic. Nei cicli 117–125: 17 risposte OK e 9 risposte 429 (35% rifiutate). Ogni 429 aspetta almeno 12 s e allarga il passo condiviso, quindi Filter/Analyst e lo Skeptic shadow restavano in coda (filter fino a 70 s, ciclo fino a 86 s).
+- Jupiter: `lite-api.jup.ag` e `api.jup.ag` (anche con la nostra chiave) condividono una sola finestra per IP di 5 richieste ogni 10 s (header `x-ratelimit-*`). Il desk li trattava come due host da 1,25 s ciascuno, da qui 0,5–0,7 risposte 429 per ciclo.
+
+Modifiche:
+
+- Gruppi di rate limit: i due host Jupiter condividono il gruppo `jup` a 2,05 s e si rispetta `x-ratelimit-reset`. GeckoTerminal a 12,5 s di base.
+- Le liste di scoperta Jupiter si aggiornano in un thread in background (stessi URL e TTL): il ciclo non aspetta più Jupiter. Il giro GeckoTerminal passa da 180 s a 420 s, con cache delle pagine condivisa con smartwallets.
+- Lo Skeptic shadow (OHLCV GeckoTerminal) gira fuori dal percorso critico del ciclo.
+- Shadow `fast_stop`: ogni 10 s una chiamata Jupiter price/v3 per le posizioni aperte. Registra quando il prezzo tocca lo stop live e, alla chiusura, quanti secondi prima e a che prezzo lo avrebbe visto. Non chiude mai trade.
+- Shadow `pp_discovery`: un WebSocket gratuito PumpPortal (`subscribeMigration`, senza chiave) salva le migrazioni pump.fun → PumpSwap e misura quante sfuggono allo Scout. Non entra nella scoperta live.
+- `wsmini.py`: client WebSocket minimo con sola stdlib.
+
+Misure (log dei cicli, ora di Roma):
+
+| | prima (cicli 100–125) | dopo, fattore smart ancora spento (cicli 126–138) |
+| --- | --- | --- |
+| durata ciclo media / mediana / max | 32,8 / 26,6 / 85,9 s | 17,9 / 18,1 / 28,0 s |
+| filter_s max | 69,9 s | 16,3 s |
+| 429 GeckoTerminal per ciclo | 1,0–1,3 | 0 |
+| 429 Jupiter per ciclo | 0,5–0,7 | 0 |
+| aggiornamento winners smartwallets | 389–698 s | 50–199 s |
+
+Nota misurata dopo: dalle 13:22 circa la lista smart wallet ha raggiunto 10 indirizzi e il fattore `smart_wallets` dell'Analyst è diventato attivo. Serve una chiamata GeckoTerminal `/trades` per ogni coin che passa il Filter (2–3 per ciclo). Dalle 13:46 c'è un "gate": durante Filter/Analyst il giro GeckoTerminal in background e lo Skeptic shadow si fermano, e le chiamate dell'Analyst usano un passo prioritario di 6,2 s. Cicli 139–153: media 58,6 s (mediana 45,4, max 122,9), filter medio 47,2 s, 0,33 risposte 429 GeckoTerminal per ciclo, 0 per Jupiter e DexScreener. Ora il limite è questa chiamata GeckoTerminal (circa 5 al minuto per IP). Ritarda solo le entrate, mai le uscite (Risk gira in un thread separato su DexScreener). I cicli restano dentro l'intervallo di 180 s.
+
+Prime prove shadow: `bul` (posizione 5) — `fast_stop` ha visto lo stop toccato 48,5 s prima dell'uscita live, a un prezzo 0,85% migliore. L'uscita live ha realizzato −10,7% con stop −6% (terza volta). `pp_discovery`: 46 migrazioni in 24 h, 38 non viste dallo Scout, 0 dentro la finestra dello Scout finora.
+
+Rollback: rimettere `desk.py` e `smartwallets.py` della versione precedente e riavviare `memedesk`.
+
 ## Servizi disattivati sulla VM Oracle (si possono riaccendere)
 
 - `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`

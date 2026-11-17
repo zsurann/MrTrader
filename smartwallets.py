@@ -332,6 +332,7 @@ class Builder:
         winners.sort(key=lambda w: (not w["mint"].endswith("pump"), w["age_h"]))
         self.queue = winners
         self.log("SW_WINNERS", candidates=len(cand), priced=len(best), winners=len(winners), secs=round(now() - t0, 1),
+                 http={k: v for k, v in self.http.snapshot().items() if "geckoterminal" in k or "jup" in k},   # v3: cumulative, 429 visibility
                  sample=[(w["symbol"], w["why"]) for w in winners[:8]])
 
     # ---------------- 2. early buyers of one winner
