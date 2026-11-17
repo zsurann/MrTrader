@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """VM-side watchdog for the PAPER MemeDesk. Runs every 5 min via systemd timer (as root).
 
-1) If desk.out shows no new 'cycle' line for > 10 min, restart memedesk.service and enqueue
-   ONE Telegram alert (at most 1 alert per hour). Alerts go through notify.Telegram so a failed
-   send is retried later from the on-disk queue instead of being lost.
+1) v7: restart memedesk.service when cycles FAIL, not only when they stop: >= 3 consecutive cycle errors
+   (cycle_health.json, written by the desk) or no SUCCESSFUL cycle for > 10 min (also falls back to the
+   last 'cycle N' line in desk.out). Telegram alert at most 1 per hour, one recovery message when cycles
+   succeed again. Alerts go through notify.Telegram (on-disk retry queue).
+   `--simulate` runs the same decision on a fake failing state: no restart, messages labelled TEST, real state untouched.
 
 2) Telegram health: call getMe, flush the pending queue, and track failures. If Telegram has
    been down for > 30 min, log loudly to telegram.log (and syslog). On recovery, send one
@@ -16,7 +18,8 @@ APP = "/opt/memedesk"
 OUT = os.path.join(APP, "desk.out")
 ST = os.path.join(APP, "watchdog_state.json")
 TGLOG = os.path.join(APP, "telegram.log")
-STALE_S, ALERT_GAP_S, TG_FAIL_S = 600, 3600, 1800
+HEALTH = os.path.join(APP, "cycle_health.json")
+STALE_S, ALERT_GAP_S, TG_FAIL_S, MAX_ERRS = 600, 3600, 1800, 3
 sys.path.insert(0, APP)
 
 def last_cycle_ts():
@@ -96,34 +99,68 @@ def check_telegram(st, now):
             _loud(f"LOUD: Telegram failing for more than 30 min (queue={qlen}). Will retry each watchdog run.")
             st["tg_alerted"] = True
 
-def main():
-    now = time.time()
-    st = json.load(open(ST)) if os.path.exists(ST) else {}
-    ts = last_cycle_ts()
-    # grace period right after a (re)start of the service
-    try:
-        act = subprocess.run(["systemctl", "show", "memedesk.service", "-p", "ActiveEnterTimestampMonotonic"],
-                             capture_output=True, text=True).stdout.strip().split("=")[-1]
-        up_s = time.monotonic() - int(act) / 1e6 if act and act != "0" else 0
-    except Exception:
-        up_s = 1e9
-    age = (now - ts) if ts else 1e9
-    if age <= STALE_S or up_s < STALE_S:
-        print(f"ok: last cycle {int(age)}s ago, service up {int(up_s)}s")
-    else:
-        print(f"STALE: last cycle {int(age)}s ago -> restarting memedesk.service")
-        subprocess.run(["systemctl", "restart", "memedesk.service"])
-        st["restarts"] = st.get("restarts", 0) + 1
-        st["last_restart"] = now
-        if now - st.get("last_alert", 0) >= ALERT_GAP_S:
+def read_health():
+    try: return json.load(open(HEALTH))
+    except Exception: return {}
+
+def decide(now, health, ts_line, up_s):
+    """-> (problem or None, last_ok_ts). Pure function so --simulate exercises the real rule."""
+    last_ok = max([t for t in (health.get("last_success_ts"), ts_line) if t] or [0]) or None
+    age = (now - last_ok) if last_ok else 1e9
+    errs = int(health.get("consecutive_errors") or 0)
+    if errs >= MAX_ERRS:
+        return f"{errs} cicli consecutivi falliti (ultimo errore: {(health.get('last_error') or 'n/d')[:120]})", last_ok
+    if age > STALE_S and up_s >= STALE_S:
+        return f"nessun ciclo riuscito da {int(age // 60)} min", last_ok
+    return None, last_ok
+
+def act(st, now, problem, simulate=False, last_ok=None):
+    tag = "🧪 TEST watchdog — " if simulate else ""
+    if problem:
+        print(("SIMULATE would restart: " if simulate else "PROBLEM -> restarting memedesk.service: ") + problem)
+        if not simulate:
+            subprocess.run(["systemctl", "restart", "memedesk.service"])
+            st["restarts"] = st.get("restarts", 0) + 1
+            st["last_restart"] = now
+            st["cycle_down"] = True
+        if simulate or now - st.get("last_alert", 0) >= ALERT_GAP_S:
             try:
-                tg = _telegram()
-                mins = int(age // 60) if ts else -1
-                ok = tg.send(f"⚠️ MemeDesk VM: nessun ciclo da {mins} min, servizio riavviato automaticamente (PAPER).")
+                ok = _telegram().send(f"{tag}⚠️ MemeDesk VM: {problem}. Servizio riavviato automaticamente (PAPER).")
                 print("alert sent" if ok else "alert queued or not sent")
-                st["last_alert"] = now  # even if queued: do not stampede
+                if not simulate: st["last_alert"] = now   # even if queued: do not stampede
             except Exception as e:
                 print("alert failed", type(e).__name__)
+    elif simulate or (st.get("cycle_down") and (last_ok or 0) > st.get("last_restart", 0)):   # a real successful cycle after the restart
+        try:
+            ok = _telegram().send(f"{tag}✅ MemeDesk VM: i cicli sono di nuovo regolari (PAPER).")
+            print("recovery sent" if ok else "recovery queued or not sent")
+        except Exception as e:
+            print("recovery failed", type(e).__name__)
+        if not simulate: st["cycle_down"] = False
+
+def main():
+    now = time.time()
+    if "--simulate" in sys.argv:   # safe test: fake failing state, then fake recovery; no restart, real state untouched
+        fake = dict(consecutive_errors=3, last_error="KeyError('simulated')", last_success_ts=now - 900)
+        problem, _ = decide(now, fake, None, 1e9)
+        act({}, now, problem, simulate=True)
+        problem2, _ = decide(now, dict(consecutive_errors=0, last_success_ts=now - 60), None, 1e9)
+        act({}, now, problem2, simulate=True)
+        return
+    st = json.load(open(ST)) if os.path.exists(ST) else {}
+    # grace period right after a (re)start of the service
+    try:
+        a_ = subprocess.run(["systemctl", "show", "memedesk.service", "-p", "ActiveEnterTimestampMonotonic"],
+                            capture_output=True, text=True).stdout.strip().split("=")[-1]
+        up_s = time.monotonic() - int(a_) / 1e6 if a_ and a_ != "0" else 0
+    except Exception:
+        up_s = 1e9
+    health = read_health()
+    problem, last_ok = decide(now, health, last_cycle_ts(), up_s)
+    if not problem:
+        print(f"ok: last successful cycle {int(now - last_ok) if last_ok else -1}s ago, "
+              f"consecutive errors {int(health.get('consecutive_errors') or 0)}, service up {int(up_s)}s")
+    act(st, now, problem, last_ok=last_ok)
     try:
         check_telegram(st, now)
     except Exception as e:

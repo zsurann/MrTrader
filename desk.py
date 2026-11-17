@@ -20,6 +20,7 @@ DATA = os.environ.get("MEMEDESK_DATA", BASE)   # override for isolated test runs
 DB_PATH = os.path.join(DATA, "desk.sqlite")
 JSONL_PATH = os.path.join(DATA, "events.jsonl")
 SUMMARY_PATH = os.path.join(DATA, "summary.txt")
+HEALTH_PATH = os.path.join(DATA, "cycle_health.json")   # v7: last successful cycle + consecutive cycle errors
 
 CFG = dict(
     # Scout
@@ -1836,14 +1837,37 @@ class Desk:
             threading.Thread(target=self.feed.loop, daemon=True, name="helius-ws").start()
             threading.Thread(target=self.ws_risk_loop, daemon=True, name="ws-risk").start()
         if self.scout.pp: threading.Thread(target=self.scout.pp.loop, daemon=True, name="pumpportal-shadow").start()
+        self._health_write(reset=True)
         while True:
             t0 = now()
-            try: self.cycle()
+            try:
+                self.cycle(); self._health_write(ok=True)
             except Exception as e:
                 CRITICAL.clear()
                 self.log.event("Logger", "CYCLE_ERROR", error=repr(e), tb=traceback.format_exc()[-1500:])
                 print(iso(), "cycle error", repr(e), flush=True)
+                self._health_write(ok=False, err=e)
             time.sleep(max(30, CFG["scan_interval_s"] - (now() - t0)))
+
+    def _health_write(self, ok=None, err=None, reset=False):
+        """v7: cycle health for the VM watchdog, the syncer (Supabase desk_status) and the external monitor.
+        The heartbeat alone keeps updating when cycles fail, so record the last SUCCESSFUL cycle separately."""
+        try:
+            try: h = json.load(open(HEALTH_PATH))
+            except Exception: h = {}
+            if reset:
+                h.update(consecutive_errors=0, started_ts=now())
+            elif ok:
+                h.update(last_success_ts=now(), last_success_cycle=self.log.cycle, consecutive_errors=0)
+            else:
+                msg = re.sub(r"(?i)(api[-_]?key|token|secret|apikey|key)=[^&\s'\"]+", r"\1=***", repr(err))
+                msg = re.sub(r"bot\d+:[A-Za-z0-9_-]+", "bot***", msg)
+                h.update(consecutive_errors=int(h.get("consecutive_errors") or 0) + 1, last_error=msg[:200], last_error_ts=now(),
+                         last_error_cycle=self.log.cycle)
+            h["updated_ts"] = now()
+            tmp = HEALTH_PATH + ".tmp"; json.dump(h, open(tmp, "w")); os.replace(tmp, HEALTH_PATH)
+        except Exception as e:
+            print(iso(), "health write failed", repr(e)[:120], flush=True)
 
 if __name__ == "__main__":
     sys.path.insert(0, BASE)

@@ -122,6 +122,22 @@ Solo paper, valgono per le nuove posizioni.
 Perché: si comprava circa il 2,9% sopra il prezzo di mercato, quindi lo stop a −6% scattava dopo circa il 3% di discesa, e gli stop chiudevano a −11%. Entrata più uscita costavano circa il 5,5% con 800 $. Con lo 0,25% della liquidità il modello dà circa l'1,25% per lato, circa il 2,5% in totale.
 La regola shadow `old_rules_v5` registra cosa avrebbero fatto le regole precedenti. Il trailing shadow al 4% ora parte dallo stesso prezzo di mercato della regola live.
 
+## Rilevamento cicli falliti (v7, 2026-11-17)
+
+Durante l'incidente v6 tutti i cicli fallivano ma l'heartbeat del syncer continuava ad aggiornarsi, quindi né il watchdog né il monitor se ne accorgevano.
+
+- `desk.py` scrive dopo ogni ciclo `cycle_health.json` (scrittura atomica): errori consecutivi, ora e numero dell'ultimo ciclo riuscito, ultimo errore ripulito da eventuali segreti (max 200 caratteri).
+- `syncer.py` invia questi campi a Supabase in `desk_status`: `last_success_at`, `last_success_cycle`, `consecutive_cycle_errors`, `last_cycle_error`, `last_cycle_error_at`.
+- `vm_watchdog.py` (timer ogni 5 minuti): se ci sono almeno 3 errori consecutivi o nessun ciclo riuscito da più di 10 minuti (con 10 minuti di tolleranza dopo un avvio), riavvia `memedesk` e manda un avviso Telegram (al massimo uno all'ora). Quando torna un ciclo riuscito dopo il riavvio manda il messaggio di ripristino. Test sicuro, senza riavvio e senza toccare lo stato:
+
+  ```bash
+  sudo systemd-run --wait --pipe -q -p EnvironmentFile=/etc/memedesk/memedesk.env /usr/bin/python3 /opt/memedesk/vm_watchdog.py --simulate
+  ```
+
+- Il worker Cloudflare `memedesk-monitor` avvisa anche se `last_success_at` è più vecchio di 15 minuti (`cycles_failing`), con lo stesso intervallo di un'ora e lo stesso messaggio di ripristino. `/run?mode=test-cycle-alert` manda un messaggio di prova senza cambiare lo stato.
+
+Le regole di trading non cambiano.
+
 ## Servizi disattivati sulla VM Oracle (si possono riaccendere)
 
 - `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`

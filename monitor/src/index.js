@@ -18,6 +18,10 @@ function publicHb(hb) {
     stale: !!hb.stale,
     desk_alive: hb.desk_alive ?? null,
     reason: hb.reason ?? null,
+    last_success_at: hb.last_success_at ?? null,
+    success_age_s: hb.successAgeMs != null ? Math.round(hb.successAgeMs / 1000) : null,
+    consecutive_cycle_errors: hb.consecutive_cycle_errors ?? null,
+    cycles_failing: !!hb.cyclesFailing,
   };
 }
 
@@ -30,7 +34,7 @@ async function latestHeartbeat(env) {
   };
   const [cyclesRes, statusRes] = await Promise.all([
     fetch(base + "/rest/v1/cycles?select=cycle,ts&order=ts.desc&limit=1", { headers }),
-    fetch(base + "/rest/v1/desk_status?select=cycle,last_cycle_at,heartbeat_at,desk_alive&id=eq.1", { headers }),
+    fetch(base + "/rest/v1/desk_status?select=cycle,last_cycle_at,heartbeat_at,desk_alive,last_success_at,consecutive_cycle_errors&id=eq.1", { headers }),
   ]);
   if (!cyclesRes.ok) throw new Error("cycles http " + cyclesRes.status);
   if (!statusRes.ok) throw new Error("desk_status http " + statusRes.status);
@@ -49,7 +53,13 @@ async function latestHeartbeat(env) {
   candidates.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
   const best = candidates[0];
   const ageMs = Date.now() - new Date(best.ts).getTime();
+  // v7: the heartbeat keeps updating while cycles fail, so also check the last SUCCESSFUL cycle.
+  const successAgeMs = s.last_success_at ? Date.now() - new Date(s.last_success_at).getTime() : null;
   return {
+    last_success_at: s.last_success_at ?? null,
+    successAgeMs,
+    consecutive_cycle_errors: s.consecutive_cycle_errors ?? null,
+    cyclesFailing: successAgeMs != null && successAgeMs > STALE_MS,
     ok: true,
     cycle: best.cycle ?? c.cycle ?? s.cycle ?? null,
     ts: best.ts,
@@ -96,6 +106,14 @@ async function runCheck(env, opts) {
     hb = { ok: false, stale: true, reason: String(err && err.message ? err.message : err) };
   }
 
+  if (opts.testCycleAlert) {
+    const sent = await sendTelegram(
+      env,
+      "🧪 TEST monitor — ⚠️ MemeDesk: nessun ciclo riuscito da 16 minuti (3 errori consecutivi): il desk è acceso ma i cicli falliscono."
+    );
+    return { action: "test-cycle-alert", telegram: sent, heartbeat: publicHb(hb) };
+  }
+
   if (opts.testAlert) {
     const age = hb.ok ? minutesLabel(hb.ageMs) : "n/d";
     const sent = await sendTelegram(
@@ -138,6 +156,27 @@ async function runCheck(env, opts) {
     state.last_check_at = now;
     await putState(env, state);
     return { action: shouldAlert ? "down-alert" : "down-quiet", telegram: sent, heartbeat: publicHb(hb) };
+  }
+
+  if (hb.cyclesFailing) {
+    const shouldAlert = !state.last_alert_at || now - state.last_alert_at >= ALERT_COOLDOWN_MS;
+    let sent = null;
+    if (shouldAlert) {
+      sent = await sendTelegram(
+        env,
+        "⚠️ MemeDesk: nessun ciclo riuscito da " +
+          minutesLabel(hb.successAgeMs) +
+          (hb.consecutive_cycle_errors != null ? " (" + hb.consecutive_cycle_errors + " errori consecutivi)" : "") +
+          ": il desk è acceso ma i cicli falliscono. Il watchdog della VM riavvia da solo; se continua serve un intervento."
+      );
+      state.last_alert_at = now;
+    }
+    state.down = true;
+    state.last_seen_ts = hb.ts || state.last_seen_ts || null;
+    state.last_cycle = hb.cycle ?? state.last_cycle ?? null;
+    state.last_check_at = now;
+    await putState(env, state);
+    return { action: shouldAlert ? "cycles-failing-alert" : "cycles-failing-quiet", telegram: sent, heartbeat: publicHb(hb) };
   }
 
   const wasDown = !!state.down;
@@ -196,7 +235,7 @@ export default {
           },
         });
       }
-      const result = await runCheck(env, { testAlert: mode === "test-alert" });
+      const result = await runCheck(env, { testAlert: mode === "test-alert", testCycleAlert: mode === "test-cycle-alert" });
       return Response.json(result);
     } catch (err) {
       return Response.json({ error: String(err && err.message ? err.message : err) }, { status: 500 });

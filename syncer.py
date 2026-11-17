@@ -37,7 +37,7 @@ def ts(x):
 CATS = [
     (r"pair too young", "età < 30m"), (r"pair too old", "età > 72h"),
     (r"mcap .*< \$300k", "mcap < $300k"), (r"mcap .*> \$20M", "mcap > $20M"),
-    (r"^liquidity", "liquidità < $40k"), (r"^1h volume", "volume 1h < $50k"),
+    (r"^liquidity", "liquidità < $100k"), (r"^1h volume", "volume 1h < $50k"),
     (r"^already \+", "già +80% in 1h"), (r"mint authority NOT", "mint non revocato"),
     (r"freeze authority NOT", "freeze non revocato"), (r"LP not burned", "LP non bruciata/bloccata"),
     (r"^top-10", "top10 > 25%"), (r"^dev holds", "dev > 3%"), (r"past rugs|rugged", "rug passati / rugged"),
@@ -261,9 +261,14 @@ class Syncer:
         alive = bool(pid) and os.path.exists(f"/proc/{pid}")
         last = self.db.execute("SELECT cycle,ts FROM cycles ORDER BY cycle DESC LIMIT 1").fetchone() or (None, None)
         cfg = self.db.execute("SELECT data FROM events WHERE kind='DESK_START' ORDER BY id DESC LIMIT 1").fetchone()
+        try: h = json.load(open(os.path.join(DATA, "cycle_health.json")))   # v7: written by the desk after every cycle
+        except Exception: h = {}
         return [dict(id=1, heartbeat_at=ts(time.time()), mode="PAPER", desk_pid=pid, desk_alive=alive, cycle=last[0],
                      last_cycle_at=ts(last[1]), cash=cash, equity=eq, start_equity=10000.0, open_positions=nopen,
-                     cfg=(json.loads(cfg[0]).get("cfg") if cfg else None))]
+                     cfg=(json.loads(cfg[0]).get("cfg") if cfg else None),
+                     last_success_at=ts(h.get("last_success_ts") or last[1]), last_success_cycle=h.get("last_success_cycle") or last[0],
+                     consecutive_cycle_errors=int(h.get("consecutive_errors") or 0),
+                     last_cycle_error=(h.get("last_error") or None), last_cycle_error_at=ts(h.get("last_error_ts")))]
 
     def step(self):
         nowt = time.time()
