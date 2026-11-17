@@ -1,0 +1,33 @@
+[Unit]
+Description=MemeDesk Oracle Always Free CPU keepalive (idle-reclaim)
+Documentation=https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
+After=network-online.target
+# Independent of the desk: a failure here must not stop trading.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /opt/memedesk/keepalive.py
+Restart=always
+RestartSec=5
+Nice=19
+CPUAffinity=0
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+MemoryMax=20M
+MemoryHigh=16M
+TasksMax=8
+DynamicUser=yes
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
