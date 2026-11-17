@@ -1,0 +1,31 @@
+[Unit]
+Description=MemeDesk PAPER desk supervisor (desk + syncer + smartwallets)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=memedesk
+Group=memedesk
+WorkingDirectory=/opt/memedesk
+EnvironmentFile=/etc/memedesk/memedesk.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash /opt/memedesk/run.sh
+KillMode=control-group
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+# Survive memory pressure on the e2-micro better than other processes
+MemoryHigh=700M
+MemoryMax=850M
+OOMScoreAdjust=-300
+Nice=0
+IOSchedulingClass=2
+IOSchedulingPriority=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/memedesk
+
+[Install]
+WantedBy=multi-user.target

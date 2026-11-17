@@ -1,0 +1,18 @@
+/opt/memedesk/desk.out /opt/memedesk/sync.out /opt/memedesk/smart.out /opt/memedesk/telegram.log {
+    size 2M
+    rotate 7
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}
+/opt/memedesk/events.jsonl {
+    size 15M
+    rotate 5
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

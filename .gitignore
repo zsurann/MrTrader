@@ -1,12 +1,53 @@
-logs/
-state.json
-state.json.tmp
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*_memedesk
+*_memedesk.pub
+
+# Runtime state and logs (never commit)
+*.sqlite
+*.sqlite-*
+*.out
+*.pid
+events.jsonl
+events.jsonl.*
+*_state.json
+notify_state.json
+telegram_queue.jsonl
+telegram_queue.jsonl.lock
+telegram.log
+telegram_status.json
+summary.txt
+.api_cache/
+.api_rate/
+
+# Python / tool caches
 __pycache__/
-smart_wallets.txt
-desk.pid
-desk.out
-smart_wallets_auto.txt
-*.tmp
-keys.env
-stocks/trader/
-stocks/logs/
+*.py[cod]
+.ruff_cache/
+.DS_Store
+
+# Dashboard build artifacts
+web/node_modules/
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
+
+# Generated Cloudflare worker bundles and screenshots
+deploy/worker.js
+deploy/cf_deploy_code.js
+deploy/*.png
+
+# Local-only backups, markers, and captures
+screens/
+web_v*_backup/
+*_backup*/
+*_pre_*.py
+*_pre_*.sh
+desk_v*_backup.py
+RUNNING_ON_*

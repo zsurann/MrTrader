@@ -1,0 +1,8 @@
+[Unit]
+Description=MemeDesk watchdog (restart if no cycle for >10 min)
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/memedesk/memedesk.env
+ExecStart=/usr/bin/python3 /opt/memedesk/vm_watchdog.py

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Size-based rotation for MemeDesk logs; logrotate itself is normally daily only.
+/usr/sbin/logrotate -s /var/lib/logrotate/memedesk.status /etc/logrotate.d/memedesk

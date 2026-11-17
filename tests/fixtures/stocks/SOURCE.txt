@@ -1,1 +1,0 @@
-From github.com/Jakeschincariol/day-trader-skill tests/fixtures (MIT). Real data, TSLA 2026-10-19.
