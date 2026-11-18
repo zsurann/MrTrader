@@ -1,0 +1,85 @@
+#!/bin/bash
+# Auto-update MemeDesk from GitHub (PAPER ONLY desk). Run as root by memedesk-autoupdate.timer.
+# New commit on the branch -> only with 0 open paper positions: back up, copy the root files to /opt/memedesk,
+# memedesk-safe-restart, wait for a successful cycle; if none comes, roll back and skip that commit.
+# Token (only for a private repo): /etc/memedesk/github_token (fine-grained, Contents: read, chmod 600).
+set -euo pipefail
+APP="${MEMEDESK_APP:-/opt/memedesk}"
+SRC="${MEMEDESK_SRC:-/var/lib/memedesk-src}"
+BRANCH="${MEMEDESK_BRANCH:-claude/brave-turing-8snpk9}"
+URL="${MEMEDESK_REPO_URL:-https://github.com/zsurann/MrTrader.git}"
+TOKEN_FILE="${MEMEDESK_TOKEN_FILE:-/etc/memedesk/github_token}"
+HEALTH_WAIT_S="${MEMEDESK_HEALTH_WAIT_S:-480}"   # first cycle starts at boot; 180 s cycles
+
+log() { echo "$*"; logger -t memedesk-autoupdate "$*" 2>/dev/null || true; }
+tg() {   # best effort, through the desk's own notifier (queues and retries on failure)
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys; sys.path.insert(0, "/opt/memedesk")
+import notify; notify.Telegram(log=lambda *a: None).send("🔄 " + sys.argv[1])
+PY
+}
+
+exec 9>/run/memedesk-autoupdate.lock
+flock -n 9 || exit 0
+
+auth=()
+if [ -s "$TOKEN_FILE" ]; then
+  auth=(-c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$(tr -d '\n\r ' < "$TOKEN_FILE")" | base64 -w0)")
+fi
+[ -d "$SRC/.git" ] || git "${auth[@]}" clone -q --depth 1 -b "$BRANCH" "$URL" "$SRC"
+git -C "$SRC" "${auth[@]}" fetch -q --depth 1 origin "$BRANCH"
+new=$(git -C "$SRC" rev-parse FETCH_HEAD)
+old=$(cat "$APP/.deployed_rev" 2>/dev/null || true)
+[ "$new" = "$old" ] && exit 0
+if [ "$new" = "$(cat "$APP/.bad_rev" 2>/dev/null || true)" ]; then exit 0; fi
+
+if ! memedesk-safe-restart --dry-run >/dev/null 2>&1; then
+  log "nuovo commit ${new:0:7}: posizioni paper aperte (o stato illeggibile), rimando"
+  exit 0
+fi
+
+git -C "$SRC" reset -q --hard FETCH_HEAD
+mapfile -t files < <(git -C "$SRC" ls-files | grep -v / | grep -vxE '\.env\.example|\.gitignore')
+for f in "${files[@]}"; do
+  case "$f" in *.py) python3 -m py_compile "$SRC/$f" || { log "commit ${new:0:7}: $f non compila, salto"; echo "$new" > "$APP/.bad_rev"; tg "Aggiornamento ${new:0:7} saltato: $f non compila."; exit 1; } ;; esac
+done
+
+bak="$APP/pre_autoupdate"
+rm -rf "$bak"; mkdir -p "$bak"
+for f in "${files[@]}"; do [ -f "$APP/$f" ] && cp -p "$APP/$f" "$bak/"; done
+for f in "${files[@]}"; do cp "$SRC/$f" "$APP/$f"; chown memedesk:memedesk "$APP/$f"; done
+chmod +x "$APP/run.sh"
+
+t0=$(date +%s)
+if ! memedesk-safe-restart; then
+  # a position opened in the meantime: new files stay on disk, the restart happens on a later run
+  log "commit ${new:0:7} copiato, riavvio rifiutato: riprovo al prossimo giro"
+  exit 0
+fi
+
+ok=0
+for _ in $(seq $((HEALTH_WAIT_S / 15))); do
+  sleep 15
+  if python3 - "$APP/cycle_health.json" "$t0" 2>/dev/null <<'PY'
+import json, sys
+h = json.load(open(sys.argv[1]))
+sys.exit(0 if (h.get("last_success_ts") or 0) > float(sys.argv[2]) else 1)
+PY
+  then ok=1; break; fi
+done
+
+if [ "$ok" = 1 ]; then
+  echo "$new" > "$APP/.deployed_rev"
+  log "deploy ${new:0:7} ok"
+  tg "Desk aggiornato a ${new:0:7}: primo ciclo riuscito."
+  exit 0
+fi
+
+log "commit ${new:0:7}: nessun ciclo riuscito in ${HEALTH_WAIT_S}s, rollback"
+for f in "${files[@]}"; do
+  if [ -f "$bak/$f" ]; then cp -p "$bak/$f" "$APP/$f"; else rm -f "$APP/$f"; fi
+done
+echo "$new" > "$APP/.bad_rev"
+memedesk-safe-restart || memedesk-safe-restart --force   # the new code never cycled, so it opened nothing
+tg "Aggiornamento ${new:0:7} fallito (nessun ciclo riuscito): ripristinata la versione precedente."
+exit 1

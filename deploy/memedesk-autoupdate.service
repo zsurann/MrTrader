@@ -1,0 +1,11 @@
+[Unit]
+Description=MemeDesk auto-update from GitHub (only with 0 open paper positions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/memedesk/memedesk.env
+ExecStart=/usr/local/sbin/memedesk-autoupdate
+TimeoutStartSec=15min

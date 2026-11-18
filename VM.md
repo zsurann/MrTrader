@@ -59,6 +59,20 @@ Solo paper. Le sezioni sotto sono uno storico: i valori citati lì valgono per l
 - Budget Helius: tetto globale 24k crediti/giorno, WS 9000/giorno, cache smart 30 min.
 - Fonte di verità: `CFG` in `desk.py`.
 
+## Aggiornamento automatico da GitHub
+
+`memedesk-autoupdate.timer` ogni 10 minuti scarica il branch `claude/brave-turing-8snpk9`. Se c'è un commit nuovo e **0 posizioni paper aperte**: backup in `/opt/memedesk/pre_autoupdate/`, copia dei file della radice del repo in `/opt/memedesk`, `memedesk-safe-restart`, attesa di un ciclo riuscito (max 8 min). Se il ciclo non arriva: rollback automatico, il commit viene saltato (`.bad_rev`), avviso Telegram. Con posizioni aperte rimanda al giro dopo. Le unità systemd in `deploy/` non si aggiornano da sole (solo `run.sh` e i `.py` della radice).
+
+Installazione (una volta, da root sulla VM). Il token serve solo se il repo è privato (GitHub fine-grained, solo `Contents: read` su questo repo):
+
+```bash
+sudo install -m 600 /dev/stdin /etc/memedesk/github_token <<< 'TOKEN'
+sudo git -c http.extraHeader="Authorization: Basic $(printf x-access-token:%s "$(sudo cat /etc/memedesk/github_token)" | base64 -w0)" clone -q --depth 1 -b claude/brave-turing-8snpk9 https://github.com/zsurann/MrTrader.git /var/lib/memedesk-src
+sudo bash /var/lib/memedesk-src/deploy/install-autoupdate.sh
+```
+
+Se i file in `/opt/memedesk` sono diversi da GitHub, l'installer si ferma e li elenca; `FORCE=1` per sovrascriverli. Log: `journalctl -u memedesk-autoupdate`. Stop: `sudo systemctl disable --now memedesk-autoupdate.timer`.
+
 ## Fonti dati e limiti API (v3, 2026-11-17)
 
 Solo paper. Le regole live non cambiano (stop −6%, trailing +12%/6%, 8% per trade, punteggio 70+). Le novità sono solo shadow (solo log).

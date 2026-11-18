@@ -1,0 +1,10 @@
+[Unit]
+Description=Check GitHub for MemeDesk updates every 10 minutes
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
