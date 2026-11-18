@@ -170,6 +170,14 @@ Baseline prima di v8 (ultime 24 h): 0 trade; ~10,7 coin per ciclo nella finestra
 
 Rollback (solo con 0 posizioni aperte): ricopiare `pre_v8/*.py` e `sudo memedesk-safe-restart`.
 
+## v8.1 budget Helius + regole ombra v9 (2026-11-18 14:51 Europe/Rome)
+
+Regole di trading invariate. Chiuse a mercato le 2 posizioni paper aperte (autorizzato dall'utente) con `manual_close.py`, motivo `manual_close_deploy`: BUTTHOLE +5,87 $ (+1,98%), SHIT −18,74 $ (−8,20%). Sono escluse dalle statistiche di strategia (`exit_reason NOT LIKE 'manual_close%'`). Poi `memedesk-safe-restart` con 0 posizioni aperte. Backup: `/opt/memedesk/pre_v81/`.
+
+- Pausa ingressi: se esiste `/opt/memedesk/PAUSE_ENTRIES` il desk non apre nuove posizioni (le uscite continuano).
+- Helius (gratis: ~33k crediti/giorno, 10 richieste/s): cache smart wallet 10 → 30 min; lookup saltato se lo score non può arrivare a 55 nemmeno con 3+ smart wallet; budget smart 15.000 → 12.000/giorno distribuito nella giornata; tetto globale 24.000/giorno per i lookup smart (il feed WS delle uscite mantiene il suo tetto di 9.000 e poi passa al polling DexScreener); batch JSON-RPC conteggiati per chiamata nel limitatore, intervallo 0,12 → 0,15 s. Uso atteso 10–18k crediti/giorno, massimo ~23k.
+- Regole ombra v9 (`shadow_v9.py`, solo log): tracker "ghost" con 8 varianti di uscita (`ghost_live_baseline`, `tp2x_half_trail25`, `ladder_2x4x_trail18`, `profit_lock`, `time_stop_15m`, `be20_trail15`, `chandelier_3atr`, `momentum_wide_trail`), 3 ingressi ombra (`dip_after_pump`, `score_45_55`, `migration_dip`) e 7 filtri ombra (`vol_spike_2x`, `buy_pressure`, `sell_spike_avoid`, `liq_growth`, `holder_growth_pos`, `new_pair_6h`, `migrated_24h`). Tabella `shadow_ghosts` con PnL ipotetico per trade.
+
 ## Servizi disattivati sulla VM Oracle (si possono riaccendere)
 
 - `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`

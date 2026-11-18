@@ -48,7 +48,7 @@ SW = dict(
     # Budget counted conservatively at 10 credits/call (Helius docs list 1-10 for archival methods).
     helius_daily_calls=2400, helius_credits_per_call=10, helius_max_pages_per_token=240,
     # v5: Analyst smart factor from Helius (getSignaturesForAddress + getTransaction = 1 credit each, Helius credits page).
-    helius_smart=True, helius_smart_daily_credits=15000, smart_compare_every=4,
+    helius_smart=True, helius_smart_daily_credits=12000, smart_compare_every=4,   # v8.1: 15000 -> 12000, paced through the day
 )
 FACTOR_MAP = {0: 0.0, 1: 45.0, 2: 75.0}   # 3+ -> 100
 PTP = dict(frac=0.40, tp_pct=0.15)          # shadow partial take-profit: 40% at +15%, 60% rides the real exit
@@ -260,7 +260,16 @@ class SmartBook:
     def _helius(self, get, S, mint, price):
         """-> (buys, credits) or (None, credits) when unavailable (no key, budget spent, RPC failure)."""
         if not (SW["helius_smart"] and self.rpc and self.url): return None, 0
-        if self._credits_today() >= SW["helius_smart_daily_credits"]: return None, 0
+        used = self._credits_today()
+        if used >= SW["helius_smart_daily_credits"]: return None, 0
+        # v8.1 pacing: spend at most the day's pro-rata share + 1h ahead, so the budget is not gone by the morning
+        lt = time.localtime(); frac = min(1.0, (lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec + 3600) / 86400)
+        if used >= SW["helius_smart_daily_credits"] * frac: return None, 0
+        g = getattr(self, "guard", None)
+        if g is not None:
+            try:
+                if not g(): return None, 0   # global Helius day cap reached (desk.helius_total_today)
+            except Exception: pass
         prog, cr = self._token_prog(mint)
         if not prog: return None, cr
         try:

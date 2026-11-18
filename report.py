@@ -63,8 +63,12 @@ def build_report(db_path=os.path.join(BASE, "desk.sqlite"), since_hours=None):
     cash = db.execute("SELECT v FROM ledger WHERE k='cash'").fetchone()[0]
     mtm = sum(q * (lp or ep) for q, lp, ep in db.execute("SELECT qty,last_price,entry_price FROM positions WHERE status='OPEN'"))
     real = db.execute("SELECT COALESCE(SUM(pnl_usd),0),COUNT(*),SUM(pnl_usd>0) FROM positions WHERE status='CLOSED'").fetchone()
+    strat = db.execute("SELECT COALESCE(SUM(pnl_usd),0),COUNT(*),SUM(pnl_usd>0) FROM positions WHERE status='CLOSED' "
+                       "AND COALESCE(exit_reason,'') NOT LIKE 'manual_close%'").fetchone()   # v8.1: manual/deploy closes are not strategy results
     P(f"\nPaper equity: ${cash + mtm:,.2f} (cash ${cash:,.2f} + open MTM ${mtm:,.2f}) vs start $10,000 → {(cash + mtm - 10000) / 100:+.2f}%")
     P(f"Realised PnL: ${real[0]:+,.2f} over {real[1]} closed trades ({real[2] or 0} winners)")
+    if strat[1] != real[1]:
+        P(f"Strategy PnL (excl. manual closes): ${strat[0]:+,.2f} over {strat[1]} trades ({strat[2] or 0} winners)")
     return "\n".join(L) + "\n"
 
 if __name__ == "__main__":

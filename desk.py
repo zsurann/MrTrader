@@ -14,13 +14,15 @@ import urllib.request, urllib.error
 from dataclasses import dataclass, asdict
 from typing import Optional
 import smartwallets as SWL   # free on-chain smart-wallet list + shadow rules (log-only)
+import shadow_v9 as SV9      # v9 SHADOW-only rules (ghost tracker + entry gates), log only
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("MEMEDESK_DATA", BASE)   # override for isolated test runs
 DB_PATH = os.path.join(DATA, "desk.sqlite")
 JSONL_PATH = os.path.join(DATA, "events.jsonl")
 SUMMARY_PATH = os.path.join(DATA, "summary.txt")
-HEALTH_PATH = os.path.join(DATA, "cycle_health.json")   # v7: last successful cycle + consecutive cycle errors
+HEALTH_PATH = os.path.join(DATA, "cycle_health.json")
+PAUSE_PATH = os.path.join(DATA, "PAUSE_ENTRIES")   # v8.1: if this file exists the Executor opens no new paper positions   # v7: last successful cycle + consecutive cycle errors
 
 CFG = dict(
     # Scout
@@ -41,7 +43,9 @@ CFG = dict(
     stop_pct=0.10, trail_activate=0.12, trail_dist=0.06, risk_poll_s=30,   # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
     # Loop
     scan_interval_s=180, rugcheck_cache_s=600,
-    smart_cache_s=600,   # v8 (perf, no rule change): reuse a mint's smart-wallet lookup for 10 min (more coins reach the Analyst each cycle)
+    smart_cache_s=1800,   # v8.1 (Helius budget): reuse a mint's smart-wallet lookup for 30 min (was 10 min)
+    helius_total_daily_credits=24000,   # v8.1: smart lookups stop (factor neutral) once smart + WS + other Helius use today passes this (free tier ~33k/day)
+    helius_smart_skip_hopeless=True,    # v8.1: skip the smart lookup when even 3+ smart wallets could not lift the score to pass_score (decision-neutral)
     # Perf (no effect on rules): parallel I/O, background GeckoTerminal discovery, RPC cache for revoked mints
     http_workers=6, filter_workers=4, gt_refresh_s=420, rpc_revoked_cache_s=3600,
     old_mint_cache_s=1800,  # skip re-pricing mints already killed as pair-too-old; TTL so a new pair is still seen
@@ -107,7 +111,7 @@ class Http:
     # 5 requests / 10 s (x-ratelimit headers) -> one rate group "jup" at 2.05s.
     BASE_GAP = {"api.dexscreener.com": 0.22, "api.rugcheck.xyz": 1.2, "api.geckoterminal.com": 12.5,
                 "api.mainnet-beta.solana.com": 0.7, "jup": 2.05,
-                "mainnet.helius-rpc.com": 0.12}
+                "mainnet.helius-rpc.com": 0.15}   # v8.1: ~6.7 req/s, and a JSON-RPC batch now counts as N requests (Helius free: 10 RPS)
     RATE_GROUP = {"lite-api.jup.ag": "jup", "api.jup.ag": "jup"}
     PRIO_GAP = {"api.geckoterminal.com": 6.2}   # Analyst lookups during the gated Filter/Analyst phase
     MIN_429_WAIT = {"api.geckoterminal.com": 12.0, "jup": 4.0,
@@ -156,7 +160,7 @@ class Http:
                 fd.close()
         except Exception:
             pass
-    def _throttle(self, host, priority=False):
+    def _throttle(self, host, priority=False, weight=1):
         base = self.BASE_GAP.get(host, 0.5)
         prio = self._priority(priority)
         with self._lock(host):
@@ -177,7 +181,7 @@ class Http:
                 wait = last + use - now()
                 if wait > 0:
                     time.sleep(wait + random.uniform(0, min(0.08, use * 0.15)))
-                last = now()
+                last = now() + max(0, weight - 1) * use   # v8.1: a batch of N calls books N slots for every process sharing the limiter
                 fd.seek(0); fd.truncate()
                 fd.write(f"{last:.6f} {self.gap.get(host, base):.6f}\n"); fd.flush()
             except Exception:
@@ -262,7 +266,7 @@ class Http:
             os.replace(tmp, path)
         except Exception:
             pass
-    def get(self, url, body=None, tries=5, headers=None, cache_s=0, priority=False):
+    def get(self, url, body=None, tries=5, headers=None, cache_s=0, priority=False, weight=1):
         parts = urllib.parse.urlsplit(url)
         host = parts.hostname or parts.netloc.split("@")[-1].split(":")[0]
         path = parts.path or "/"
@@ -283,7 +287,7 @@ class Http:
                  http.client.RemoteDisconnected, http.client.CannotSendRequest, OSError)
         i = 0
         while i < tries:
-            self._throttle(self.RATE_GROUP.get(host, host), priority=priority)
+            self._throttle(self.RATE_GROUP.get(host, host), priority=priority, weight=weight)
             conn = None
             try:
                 conn = self._checkout(host, timeout=25)
@@ -331,7 +335,7 @@ class Http:
         for off in range(0, len(calls), batch_size):
             chunk = calls[off:off + batch_size]
             body = [{"jsonrpc": "2.0", "id": i, "method": m, "params": p} for i, (m, p) in enumerate(chunk)]
-            d = self.get(url, body=body, tries=tries, priority=priority)
+            d = self.get(url, body=body, tries=tries, priority=priority, weight=(len(chunk) if "helius" in url else 1))
             if isinstance(d, list):
                 by_id = {item.get("id"): item for item in d if isinstance(item, dict)}
                 for i in range(len(chunk)):
@@ -351,6 +355,21 @@ HTTP = Http()
 # v3: set while the cycle's Filter/Analyst phase runs. Background GeckoTerminal users (discovery sweep,
 # shadow Skeptic) wait for it to clear so the Analyst's GT trades lookup never queues behind them.
 CRITICAL = threading.Event()
+_HTOT = [0.0, 0.0]
+def helius_total_today(db, lock):
+    """v8.1: Helius credits used today (smart lookups + WS estimate + other RPC calls at 1 credit each). Cached 60 s."""
+    if now() - _HTOT[1] < 60: return _HTOT[0]
+    day = time.strftime("%Y-%m-%d"); tot = 0.0
+    try:
+        with lock:
+            for q in ("SELECT credits FROM helius_smart_usage WHERE day=?", "SELECT credits_est FROM helius_ws_usage WHERE day=?",
+                      "SELECT calls FROM helius_usage WHERE day=?"):
+                try:
+                    r = db.execute(q, (day,)).fetchone(); tot += float(r[0]) if r and r[0] else 0.0
+                except Exception: pass
+    except Exception: pass
+    _HTOT[0], _HTOT[1] = tot, now()
+    return tot
 def wait_not_critical(max_s=240):
     t0 = time.time()
     while CRITICAL.is_set() and time.time() - t0 < max_s: time.sleep(0.5)
@@ -778,7 +797,7 @@ class Filter:
         if not need: return
         url = self._rpc_url()
         calls = [("getAccountInfo", [m, {"encoding": "jsonParsed"}]) for m in need]
-        results = HTTP.rpc_batch(url, calls, tries=3, batch_size=20 if "helius" in url else 10)
+        results = HTTP.rpc_batch(url, calls, tries=3, batch_size=10)   # v8.1: <= 10 per batch (Helius free: 10 RPS, a batch counts per call)
         if "helius" in url: self._note_helius(len(need))
         for m, raw in zip(need, results):
             info = self._parse_mint_info(raw)
@@ -922,9 +941,10 @@ class Filter:
 def clamp(x, a=0.0, b=100.0): return max(a, min(b, x))
 class Analyst:
     def __init__(self, log: Logger):
-        self.log = log; self.smart = SWL.SmartBook(log.db, log.lock); self._smart_cache = {}
+        self.log = log; self.smart = SWL.SmartBook(log.db, log.lock); self._smart_cache = {}; self.last_score = {}
         self.smart.url = helius_rpc_url(); self.smart.wait = wait_not_critical   # v5: Helius smart-wallet lookups
         self.smart.rpc = lambda url, calls: HTTP.rpc_batch(url, calls, tries=2, priority=True, batch_size=10)
+        self.smart.guard = lambda: helius_total_today(log.db, log.lock) < (CFG.get("helius_total_daily_credits") or 24000)   # v8.1
     def run(self, fp: FilterPass) -> Optional[AnalystPass]:
         assert isinstance(fp, FilterPass)
         c = fp.cand; pc = c.price_change; tx = c.txns
@@ -974,8 +994,13 @@ class Analyst:
         comp["liq_mcap"] = clamp(500 * lm); notes["liq_mcap"] = round(lm, 4)
         # smart wallets: distinct tracked smart wallets (free on-chain list, see smartwallets.py) that bought recently
         # 0 -> 0, 1 -> 45, 2 -> 75, 3+ -> 100. Lookup failure / list too small -> None -> renormalised (never penalises)
+        W0 = CFG["weights"]; bw0 = sum(w for k, w in W0.items() if k != "smart_wallets" and comp.get(k) is not None and w > 0)
+        base0 = (sum(comp[k] * w for k, w in W0.items() if k != "smart_wallets" and comp.get(k) is not None and w > 0) / bw0) if bw0 else 0.0
+        hopeless = bool(CFG.get("helius_smart_skip_hopeless")) and bw0 and base0 + W0["smart_wallets"] * (100.0 - base0) < CFG["pass_score"]
         hit = self._smart_cache.get(c.mint)
-        if hit and now() - hit[0] < (CFG.get("smart_cache_s") or 0):   # v8 perf: same lookup reused for a few cycles
+        if hopeless:   # v8.1: even 3+ smart wallets could not reach pass_score -> lookup cannot change the decision; save Helius credits
+            sv, sinfo = None, dict(status=f"skipped: base {base0:.1f} cannot reach {CFG['pass_score']:.0f} even with 3+ smart wallets (Helius saved)")
+        elif hit and now() - hit[0] < (CFG.get("smart_cache_s") or 0):   # v8 perf: same lookup reused for a few cycles
             sv, sinfo = hit[1], dict(hit[2], cached_s=round(now() - hit[0]))
         else:
             try: sv, sinfo = self.smart.factor(lambda u, **kw: HTTP.get(u, tries=2, priority=True, **kw), c.mint, c.pair_address, c.price_usd)
@@ -1000,6 +1025,8 @@ class Analyst:
         components["_score_old"] = score_old
         components["_inputs"] = notes
         passed = score >= CFG["pass_score"]
+        self.last_score[c.mint] = score
+        if len(self.last_score) > 2000: self.last_score.clear()
         self.log.score(c.mint, c.symbol, score, passed, components)
         if not passed:
             self.log.kill("Analyst", c.mint, c.symbol, c.pair_address, [f"score {score} < {CFG['pass_score']:.0f}"],
@@ -1032,6 +1059,8 @@ class Executor:
     def run(self, ap: AnalystPass) -> Optional[PaperOrder]:
         assert isinstance(ap, AnalystPass)
         c = ap.fp.cand
+        if os.path.exists(PAUSE_PATH):   # v8.1: operator pause (e.g. before a deploy). Exits keep running.
+            self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["entries paused (PAUSE_ENTRIES file)"], {}); return None
         with self.log.lock:
             db = self.log.db
             if db.execute("SELECT 1 FROM positions WHERE mint=? AND status='OPEN'", (c.mint,)).fetchone():
@@ -1785,6 +1814,18 @@ class Desk:
         self.fast = FastStopShadow(self.log)
         self.feed = HeliusFeed(self.log, self.fast) if helius_rpc_url() else None
         self.risk.feed = self.feed
+        self.liq_hist = {}   # v9 shadow: mint -> [(ts, liq)] over the last 2h (Scout candidates)
+        try:
+            self.ghosts = SV9.GhostBook(self.log.db, self.log.lock, self.log.jsonl, lambda u: HTTP.get(u, tries=2), paper_sell_fill, CFG,
+                                        self.log.event, SWL.shadow_event)
+        except Exception as e:
+            self.ghosts = None; self.log.event("Shadow", "ERROR", rule="ghost_v9_init", error=repr(e)[:200])
+    def _mig_ts(self, mint):
+        try:
+            with self.log.lock:
+                r = self.log.db.execute("SELECT ts FROM pp_migrations WHERE mint=?", (mint,)).fetchone()
+            return r[0] if r else None
+        except Exception: return None
     def ws_risk_loop(self):
         while not self.stop.is_set():
             try: self.risk.ws_tick()
@@ -1825,6 +1866,11 @@ class Desk:
                                      f"pre-v6 score (smart 0 counted as 0) < {OLD_RULES_V5['pass_score']:.0f}; old size 8% of equity, no liquidity cap")
             sr = strict_v7_reasons(c, ap.fp.checks, ap.score)   # v8: would the v6/v7 strict live entry rules have taken it?
             gates["strict_v7"] = (score_bucket(ap.score), bool(sr), "v7 strict entry: " + ("; ".join(sr) if sr else "would also pass"))
+            try: gates.update(SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint)))   # v9 shadow entry gates (log only)
+            except Exception as e: self.log.event("Shadow", "ERROR", rule="v9_gates", error=repr(e)[:200])
+            if order and self.ghosts and pid:
+                try: self.ghosts.on_live_entry(pid, order, ap)   # v9 ghost exit variants for this live entry
+                except Exception as e: self.log.event("Shadow", "ERROR", rule="ghost_v9_entry", error=repr(e)[:200])
             for rule, (val, blk, why) in gates.items():
                 SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, rule, "ENTRY_GATE", c.mint, c.symbol, pid,
                                  cycle=self.log.cycle, score=ap.score, value=val, would_block=blk, entered=bool(order), rule_text=why)
@@ -1840,12 +1886,28 @@ class Desk:
             self.shadow_pool.submit(_sk)
         except Exception as e:
             self.log.event("Shadow", "ERROR", error=repr(e))
+    def _v9_entry(self, fp, ap, order):
+        """v9 SHADOW entries for Filter passes the live desk did not enter (log only)."""
+        if not self.ghosts or order: return
+        try:
+            score = ap.score if ap else self.analyst.last_score.get(fp.cand.mint)
+            with self.log.lock:
+                live = {r[0] for r in self.log.db.execute("SELECT mint FROM positions WHERE status='OPEN'")}
+            self.ghosts.consider_entries(fp, score, self._mig_ts(fp.cand.mint), live, self.exec.equity()[1])
+        except Exception as e:
+            self.log.event("Shadow", "ERROR", rule="ghost_v9_shadow_entry", error=repr(e)[:200])
     def cycle(self):
         self.log.cycle += 1
         t0 = now(); http0 = HTTP.snapshot(); self.log.event("Logger", "CYCLE_START")
         t_sc = now()
         cands, st = self.scout.run()
         scout_s = now() - t_sc
+        try:   # v9 shadow: liquidity history for the liq_growth gate (in memory, 2h)
+            tcut = now() - 7200
+            for c in cands:
+                h = [x for x in self.liq_hist.get(c.mint, []) if x[0] >= tcut]; h.append((now(), c.liq_usd)); self.liq_hist[c.mint] = h[-60:]
+            for m in [m for m, h in self.liq_hist.items() if not h or h[-1][0] < tcut]: self.liq_hist.pop(m, None)
+        except Exception: pass
         # Cheap market kills first (no RugCheck/RPC/Jupiter). Then one batched Helius getAccountInfo
         # for the survivors, so we never spend on-chain quota on tokens Scout/market already rejected.
         alive = []
@@ -1865,10 +1927,12 @@ class Desk:
         for fp, ap in HTTP.map(fa, alive, workers=CFG["filter_workers"]):
             if not fp: continue
             fpass += 1
-            if not ap: continue
+            if not ap:
+                self._v9_entry(fp, None, None); continue
             apass += 1
             order = self.exec.run(ap)
             if order: entries += 1
+            else: self._v9_entry(fp, ap, order)
             self.shadow_entry_gate(ap, order)
         CRITICAL.clear(); fa_s = now() - t_fa
         cash, eq = self.exec.equity()
@@ -1888,6 +1952,7 @@ class Desk:
             threading.Thread(target=self.feed.loop, daemon=True, name="helius-ws").start()
             threading.Thread(target=self.ws_risk_loop, daemon=True, name="ws-risk").start()
         if self.scout.pp: threading.Thread(target=self.scout.pp.loop, daemon=True, name="pumpportal-shadow").start()
+        if self.ghosts: threading.Thread(target=self.ghosts.loop, daemon=True, name="ghost-v9-shadow").start()
         self._health_write(reset=True)
         while True:
             t0 = now()
