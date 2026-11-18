@@ -49,6 +49,16 @@ VM=user@host KEY=/path/to/ssh_key ./vm_status.sh
 
 In console Oracle non usare Terminate: cancellerebbe la VM. Stop e Reboot fermano il desk.
 
+## Regole live attuali (v8_loose + v8.1)
+
+Solo paper. Le sezioni sotto sono uno storico: i valori citati lì valgono per la versione di quel momento. Oggi:
+
+- Ingresso: score ≥ 55, liquidità ≥ 25k $, volume 1h ≥ 15k $, mcap 100k–20M $, età 0,5–168 h, salita 1h ≤ +150%, top 10 ≤ 35%, dev ≤ 5%, bundle ≤ 20%, LP bloccata, mint/freeze revocate.
+- Taglia: 3% dell'equity, ≤ cash e ≤ 0,25% della liquidità; max 15 posizioni aperte; cooldown di rientro 1 h. File `PAUSE_ENTRIES` = nessun nuovo ingresso.
+- Uscita: stop −10% dal prezzo di mercato all'ingresso, trailing da +12% con distanza 6%; prezzo da WebSocket Helius, fallback DexScreener.
+- Budget Helius: tetto globale 24k crediti/giorno, WS 9000/giorno, cache smart 30 min.
+- Fonte di verità: `CFG` in `desk.py`.
+
 ## Fonti dati e limiti API (v3, 2026-11-17)
 
 Solo paper. Le regole live non cambiano (stop −6%, trailing +12%/6%, 8% per trade, punteggio 70+). Le novità sono solo shadow (solo log).
@@ -160,7 +170,7 @@ Solo paper. L'utente ha chiesto molte più operazioni con soldi finti, per racco
 | posizioni aperte max | 10 | 15 |
 | cooldown di rientro | 6 h | 1 h |
 | budget WS Helius/giorno | 6000 | 9000 |
-| cache fattore smart (nuova, prestazioni) | — | 600 s |
+| cache fattore smart (nuova, prestazioni) | — | 600 s (1800 s da v8.1) |
 
 Restano: mint/freeze revocate, LP bruciata/bloccata, RugCheck rugged, rug passati del dev, transfer fee, permanent delegate, fail-closed sui dati mancanti.
 
