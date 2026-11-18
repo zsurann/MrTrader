@@ -14,8 +14,8 @@ Il desk live gira su una VM Oracle Always Free (Ubuntu, forma Micro AMD) nella h
 
 ## Unità systemd (copie in `deploy/`)
 
-- `memedesk.service`: avvia `run.sh` (desk + syncer + smartwallets), `Restart=always`, abilitato al boot. Limiti memoria e hardening (`MemoryHigh=700M` / `MemoryMax=850M`, `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`).
-- `memedesk-watchdog.timer` → `memedesk-watchdog.service`: ogni 5 minuti esegue `vm_watchdog.py`. Se non c'è un ciclo da più di 10 minuti, riavvia il servizio e manda al massimo un avviso Telegram all'ora. Controlla anche che il bot Telegram risponda e svuota la coda.
+- `memedesk.service`: avvia `run.sh` (desk + syncer + smartwallets), `Restart=always`, abilitato al boot. Limiti memoria e hardening (`MemoryHigh=700M` / `MemoryMax=850M`, `OOMScoreAdjust=-500`, `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, `PrivateTmp`).
+- `memedesk-watchdog.timer` → `memedesk-watchdog.service`: ogni 5 minuti esegue `vm_watchdog.py`. Se ci sono almeno 3 errori consecutivi o nessun ciclo riuscito da più di 10 minuti, riavvia il servizio e manda al massimo un avviso Telegram all'ora, ma solo se non ci sono posizioni paper aperte. Se ci sono posizioni aperte (o lo stato non è leggibile) non riavvia e avvisa. Controlla anche che il bot Telegram risponda e svuota la coda.
 - `memedesk-keepalive.service` (script `keepalive.py`): carico CPU a priorità minima per il recupero Always Free da inattività. `Nice=19`, `CPUSchedulingPolicy=idle`, `IOSchedulingClass=idle`, `CPUAffinity=0`, `MemoryMax=20M`, `Restart=always`, abilitato al boot. Si ferma da solo mentre il desk è in esecuzione. Per spegnerlo, senza toccare il desk:
 
   ```bash
@@ -29,7 +29,10 @@ Un controllo esterno (Cloudflare Worker cron, piano Free) avvisa su Telegram se 
 ## Comandi sulla VM
 
 ```bash
-sudo systemctl restart memedesk
+# Riavvio solo se non ci sono posizioni paper aperte (obbligatorio per i deploy):
+sudo memedesk-safe-restart
+# Per forzare comunque (sconsigliato con posizioni aperte): sudo memedesk-safe-restart --force
+# Non usare `systemctl restart memedesk` nei deploy: ignora le posizioni aperte.
 systemctl status memedesk --no-pager
 sudo tail -f /opt/memedesk/desk.out
 sudo grep " cycle " /opt/memedesk/desk.out | tail -1
@@ -128,7 +131,7 @@ Durante l'incidente v6 tutti i cicli fallivano ma l'heartbeat del syncer continu
 
 - `desk.py` scrive dopo ogni ciclo `cycle_health.json` (scrittura atomica): errori consecutivi, ora e numero dell'ultimo ciclo riuscito, ultimo errore ripulito da eventuali segreti (max 200 caratteri).
 - `syncer.py` invia questi campi a Supabase in `desk_status`: `last_success_at`, `last_success_cycle`, `consecutive_cycle_errors`, `last_cycle_error`, `last_cycle_error_at`.
-- `vm_watchdog.py` (timer ogni 5 minuti): se ci sono almeno 3 errori consecutivi o nessun ciclo riuscito da più di 10 minuti (con 10 minuti di tolleranza dopo un avvio), riavvia `memedesk` e manda un avviso Telegram (al massimo uno all'ora). Quando torna un ciclo riuscito dopo il riavvio manda il messaggio di ripristino. Test sicuro, senza riavvio e senza toccare lo stato:
+- `vm_watchdog.py` (timer ogni 5 minuti): se ci sono almeno 3 errori consecutivi o nessun ciclo riuscito da più di 10 minuti (con 10 minuti di tolleranza dopo un avvio), riavvia `memedesk` e manda un avviso Telegram (al massimo uno all'ora), ma solo se non ci sono posizioni paper aperte in `desk.sqlite`. Se ci sono posizioni aperte, o se il conteggio non è leggibile, il riavvio viene saltato e arriva un avviso (anche questo al massimo uno all'ora). Quando torna un ciclo riuscito dopo un riavvio effettivo manda il messaggio di ripristino. Test sicuro, senza riavvio e senza toccare lo stato:
 
   ```bash
   sudo systemd-run --wait --pipe -q -p EnvironmentFile=/etc/memedesk/memedesk.env /usr/bin/python3 /opt/memedesk/vm_watchdog.py --simulate
@@ -145,6 +148,21 @@ Le regole di trading non cambiano.
 - Non disattivare `snapd`, l'agente Oracle, l'updater o `runcommand`. Non disattivare `iscsid` se potresti attaccare un volume.
 
 Gli aggiornamenti di sicurezza automatici restano accesi; il riavvio automatico è disattivato (`Unattended-Upgrade::Automatic-Reboot "false"`).
+
+## Niente riavvii deliberati con posizioni aperte (2026-11-18, Europe/Rome)
+
+Obiettivo: mentre ci sono posizioni paper aperte, il desk non deve essere riavviato di proposito.
+
+- `needrestart` non riavvia più automaticamente i servizi `memedesk*` dopo un aggiornamento delle librerie (file `deploy/needrestart-memedesk.conf`, installato in `/etc/needrestart/conf.d/memedesk.conf`). È così che Ubuntu, il 18 novembre alle 07:07 (Europe/Rome), ha riavviato il desk dopo l'aggiornamento di `libc6`.
+- Il riavvio automatico della VM dopo `unattended-upgrades` resta disattivato (`deploy/99memedesk-reboot` → `/etc/apt/apt.conf.d/99memedesk-reboot`, `Unattended-Upgrade::Automatic-Reboot "false"`).
+- Il watchdog, se il desk sembra fermo ma ci sono posizioni aperte (o non riesce a leggerle), non riavvia e avvisa su Telegram.
+- I deploy successivi devono usare `/usr/local/sbin/memedesk-safe-restart` (sorgente in `deploy/memedesk-safe-restart`). Se ci sono posizioni aperte, o se lo stato non è leggibile, lo script rifiuta. `--force` lo supera, ma è sconsigliato.
+- `OOMScoreAdjust=-500` sul servizio (e, a caldo, sui processi già in esecuzione) fa sì che, in caso di poca memoria, il kernel preferisca chiudere altri processi prima del desk.
+
+Limiti che non si possono togliere: un crash del processo, un OOM che colpisce comunque il desk, una manutenzione Oracle o un reboot della VM. In quei casi il desk è già fermo; `Restart=always` deve restare, così il servizio riparte da solo. Un kernel nuovo può restare in attesa: si riavvia la VM solo a mano, e solo quando non ci sono posizioni aperte.
+
+Le regole di trading non cambiano.
+
 
 ## Rischio di recupero per inattività (Always Free)
 

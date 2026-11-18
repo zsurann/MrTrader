@@ -1,0 +1,80 @@
+#!/bin/bash
+# Restart memedesk.service only if there are no OPEN paper positions.
+# Usage: memedesk-safe-restart [--force] [--dry-run]
+# Exit 0: restarted (or would restart, with --dry-run)
+# Exit 2: refused (positions open, or state unreadable)
+# Exit 1: bad usage
+# Optional: MEMEDESK_DB=/path/to/desk.sqlite (tests only; default /opt/memedesk/desk.sqlite)
+set -euo pipefail
+DB="${MEMEDESK_DB:-/opt/memedesk/desk.sqlite}"
+FORCE=0
+DRY=0
+for a in "$@"; do
+  case "$a" in
+    --force) FORCE=1 ;;
+    --dry-run) DRY=1 ;;
+    -h|--help)
+      echo "Usage: memedesk-safe-restart [--force] [--dry-run]"
+      echo "Riavvia memedesk.service solo se non ci sono posizioni paper aperte."
+      echo "  --force    riavvia comunque (sconsigliato se ci sono posizioni aperte)"
+      echo "  --dry-run  controlla e stampa la decisione, senza riavviare"
+      exit 0
+      ;;
+    *)
+      echo "argomento sconosciuto: $a (prova --help)" >&2
+      exit 1
+      ;;
+  esac
+done
+
+export MEMEDESK_DB="$DB"
+out=$(python3 - <<'PY'
+import os, sqlite3, sys
+db = os.environ.get("MEMEDESK_DB", "/opt/memedesk/desk.sqlite")
+try:
+    if not os.path.exists(db):
+        print("undetermined")
+        sys.exit(0)
+    conn = sqlite3.connect("file:{}?mode=ro".format(db), uri=True, timeout=5)
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM positions WHERE status='OPEN'").fetchone()[0]
+        print(int(n))
+    finally:
+        conn.close()
+except Exception:
+    print("undetermined")
+PY
+)
+
+restart() {
+  if [ "$DRY" = 1 ]; then
+    echo "DRY-RUN: riavvierei memedesk.service (nessun riavvio eseguito)."
+    exit 0
+  fi
+  systemctl restart memedesk.service
+  echo "memedesk.service riavviato"
+}
+
+if [ "$out" = "undetermined" ]; then
+  if [ "$FORCE" = 1 ]; then
+    echo "ATTENZIONE: impossibile leggere le posizioni aperte; riavvio forzato (--force)."
+    restart
+    exit 0
+  fi
+  echo "RIFIUTATO: impossibile leggere le posizioni aperte. Nessun riavvio. Usa --force per forzare." >&2
+  exit 2
+fi
+
+if [ "$out" -gt 0 ] && [ "$FORCE" != 1 ]; then
+  if [ "$out" -eq 1 ]; then
+    echo "RIFIUTATO: 1 posizione paper aperta. Nessun riavvio. Usa --force per forzare." >&2
+  else
+    echo "RIFIUTATO: $out posizioni paper aperte. Nessun riavvio. Usa --force per forzare." >&2
+  fi
+  exit 2
+fi
+
+if [ "$out" -gt 0 ]; then
+  echo "ATTENZIONE: $out posizioni paper aperte; riavvio forzato (--force)."
+fi
+restart

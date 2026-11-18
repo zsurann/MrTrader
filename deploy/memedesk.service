@@ -18,7 +18,7 @@ TimeoutStopSec=30
 # Limits sized for a ~1 GB Always Free VM (desk + syncer + smartwallets in one cgroup)
 MemoryHigh=700M
 MemoryMax=850M
-OOMScoreAdjust=-300
+OOMScoreAdjust=-500
 TasksMax=256
 NoNewPrivileges=true
 PrivateTmp=true

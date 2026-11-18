@@ -7,18 +7,23 @@
    succeed again. Alerts go through notify.Telegram (on-disk retry queue).
    `--simulate` runs the same decision on a fake failing state: no restart, messages labelled TEST, real state untouched.
 
-2) Telegram health: call getMe, flush the pending queue, and track failures. If Telegram has
+2) Never deliberately restart while paper positions are OPEN. Open count comes from desk.sqlite
+   (`positions.status='OPEN'`, read-only). If the count cannot be read, treat as open (skip restart
+   and alert). The skip alert is also rate-limited to at most 1 per hour.
+
+3) Telegram health: call getMe, flush the pending queue, and track failures. If Telegram has
    been down for > 30 min, log loudly to telegram.log (and syslog). On recovery, send one
    message saying alerts were delayed.
 
 The bot token is read from env and never printed."""
-import json, os, re, subprocess, sys, time
+import json, os, re, sqlite3, subprocess, sys, time
 from datetime import datetime
 APP = "/opt/memedesk"
 OUT = os.path.join(APP, "desk.out")
 ST = os.path.join(APP, "watchdog_state.json")
 TGLOG = os.path.join(APP, "telegram.log")
 HEALTH = os.path.join(APP, "cycle_health.json")
+DB = os.path.join(APP, "desk.sqlite")
 STALE_S, ALERT_GAP_S, TG_FAIL_S, MAX_ERRS = 600, 3600, 1800, 3
 sys.path.insert(0, APP)
 
@@ -103,6 +108,25 @@ def read_health():
     try: return json.load(open(HEALTH))
     except Exception: return {}
 
+def open_position_count():
+    """Return (count_or_None, determined).
+
+    determined=False means the desk state could not be read — callers must treat
+    that as open and refuse a deliberate restart.
+    """
+    try:
+        if not os.path.exists(DB):
+            return None, False
+        conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+        try:
+            n = conn.execute("SELECT COUNT(*) FROM positions WHERE status='OPEN'").fetchone()[0]
+            return int(n), True
+        finally:
+            conn.close()
+    except Exception as e:
+        _loud(f"open position count failed {type(e).__name__}")
+        return None, False
+
 def decide(now, health, ts_line, up_s):
     """-> (problem or None, last_ok_ts). Pure function so --simulate exercises the real rule."""
     last_ok = max([t for t in (health.get("last_success_ts"), ts_line) if t] or [0]) or None
@@ -114,9 +138,29 @@ def decide(now, health, ts_line, up_s):
         return f"nessun ciclo riuscito da {int(age // 60)} min", last_ok
     return None, last_ok
 
-def act(st, now, problem, simulate=False, last_ok=None):
+def _skip_why(problem, nopen, determined):
+    if not determined:
+        return (f"{problem}. Non riesco a leggere le posizioni aperte: "
+                f"riavvio NON eseguito per sicurezza (PAPER).")
+    label = "posizione aperta" if nopen == 1 else "posizioni aperte"
+    return f"{problem}. Il desk ha {nopen} {label}: riavvio NON eseguito (PAPER)."
+
+def act(st, now, problem, simulate=False, last_ok=None, nopen=0, determined=True):
+    """Apply the watchdog decision. Returns 'restart', 'skip', 'recovery', or 'ok'."""
     tag = "🧪 TEST watchdog — " if simulate else ""
     if problem:
+        blocked = (not determined) or ((nopen or 0) > 0)
+        if blocked:
+            why = _skip_why(problem, nopen, determined)
+            print(("SIMULATE would SKIP restart: " if simulate else "PROBLEM -> SKIP restart (open positions): ") + why)
+            if simulate or now - st.get("last_skip_alert", 0) >= ALERT_GAP_S:
+                try:
+                    ok = _telegram().send(f"{tag}⚠️ MemeDesk VM: {why}")
+                    print("skip-alert sent" if ok else "skip-alert queued or not sent")
+                    if not simulate: st["last_skip_alert"] = now
+                except Exception as e:
+                    print("skip-alert failed", type(e).__name__)
+            return "skip"
         print(("SIMULATE would restart: " if simulate else "PROBLEM -> restarting memedesk.service: ") + problem)
         if not simulate:
             subprocess.run(["systemctl", "restart", "memedesk.service"])
@@ -130,6 +174,7 @@ def act(st, now, problem, simulate=False, last_ok=None):
                 if not simulate: st["last_alert"] = now   # even if queued: do not stampede
             except Exception as e:
                 print("alert failed", type(e).__name__)
+        return "restart"
     elif simulate or (st.get("cycle_down") and (last_ok or 0) > st.get("last_restart", 0)):   # a real successful cycle after the restart
         try:
             ok = _telegram().send(f"{tag}✅ MemeDesk VM: i cicli sono di nuovo regolari (PAPER).")
@@ -137,14 +182,24 @@ def act(st, now, problem, simulate=False, last_ok=None):
         except Exception as e:
             print("recovery failed", type(e).__name__)
         if not simulate: st["cycle_down"] = False
+        return "recovery"
+    return "ok"
 
 def main():
     now = time.time()
     if "--simulate" in sys.argv:   # safe test: fake failing state, then fake recovery; no restart, real state untouched
+        live_n, live_ok = open_position_count()
+        print(f"live open positions: {live_n if live_ok else 'UNDETERMINED'}")
         fake = dict(consecutive_errors=3, last_error="KeyError('simulated')", last_success_ts=now - 900)
         problem, _ = decide(now, fake, None, 1e9)
-        act({}, now, problem, simulate=True)
+        print("branch 0 open (would restart):")
+        act({}, now, problem, simulate=True, nopen=0, determined=True)
+        print("branch 2 open (would skip):")
+        act({}, now, problem, simulate=True, nopen=2, determined=True)
+        print("branch undetermined (would skip):")
+        act({}, now, problem, simulate=True, nopen=None, determined=False)
         problem2, _ = decide(now, dict(consecutive_errors=0, last_success_ts=now - 60), None, 1e9)
+        print("branch recovered:")
         act({}, now, problem2, simulate=True)
         return
     st = json.load(open(ST)) if os.path.exists(ST) else {}
@@ -157,10 +212,12 @@ def main():
         up_s = 1e9
     health = read_health()
     problem, last_ok = decide(now, health, last_cycle_ts(), up_s)
+    nopen, determined = open_position_count()
     if not problem:
+        pos = f"{nopen} open" if determined else "open positions UNDETERMINED"
         print(f"ok: last successful cycle {int(now - last_ok) if last_ok else -1}s ago, "
-              f"consecutive errors {int(health.get('consecutive_errors') or 0)}, service up {int(up_s)}s")
-    act(st, now, problem, last_ok=last_ok)
+              f"consecutive errors {int(health.get('consecutive_errors') or 0)}, service up {int(up_s)}s, {pos}")
+    act(st, now, problem, last_ok=last_ok, nopen=nopen, determined=determined)
     try:
         check_telegram(st, now)
     except Exception as e:
