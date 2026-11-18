@@ -24,23 +24,24 @@ HEALTH_PATH = os.path.join(DATA, "cycle_health.json")   # v7: last successful cy
 
 CFG = dict(
     # Scout
-    min_age_h=0.5, max_age_h=72.0, min_mcap=300_000, max_mcap=20_000_000,
+    min_age_h=0.5, max_age_h=168.0, min_mcap=100_000, max_mcap=20_000_000,   # v8_loose (user-approved 2026-11-18): age 72h -> 168h, mcap min 300k -> 100k
     # Filter
-    min_liq=100_000, min_vol_h1=50_000, max_top10_pct=25.0, max_dev_pct=3.0,   # v6 (user-approved): min liquidity 40k -> 100k
-    max_bundle_pct=10.0, max_h1_change=80.0, min_primary_lp_locked=90.0,
+    min_liq=25_000, min_vol_h1=15_000, max_top10_pct=35.0, max_dev_pct=5.0,   # v8_loose: liq 100k -> 25k, vol1h 50k -> 15k, top10 25 -> 35%, dev 3 -> 5%
+    max_bundle_pct=20.0, max_h1_change=150.0, min_primary_lp_locked=90.0,   # v8_loose: bundle 10 -> 20%, 1h pump cap +80 -> +150%; LP lock unchanged
     min_weighted_lp_locked=80.0, past_rug_dead_mcap=10_000, past_rug_min_dead=2,
     # Analyst
-    pass_score=70.0,
+    pass_score=55.0,   # v8_loose: 70 -> 55
     weights=dict(momentum=0.20, unique_buyers=0.15, buy_sell=0.20, holder_growth=0.15,
                  liq_mcap=0.15, smart_wallets=0.15),  # intended weights (sum 1.0); if smart data unavailable -> renormalised over the other 5
     # Executor
-    start_equity=10_000.0, max_pos_frac=0.05, max_open=10, reentry_cooldown_h=6.0,   # v6: 8% -> 5% of equity
+    start_equity=10_000.0, max_pos_frac=0.03, max_open=15, reentry_cooldown_h=1.0,   # v8_loose: size 5% -> 3%, max open 10 -> 15, cooldown 6h -> 1h
     max_liq_frac=0.0025,   # v6: size also capped at 0.25% of pool liquidity (modeled impact <= 0.5% per side)
     base_slippage=0.005, swap_fee=0.0025,  # + price impact = size / (liq/2)
     # Risk
     stop_pct=0.10, trail_activate=0.12, trail_dist=0.06, risk_poll_s=30,   # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
     # Loop
     scan_interval_s=180, rugcheck_cache_s=600,
+    smart_cache_s=600,   # v8 (perf, no rule change): reuse a mint's smart-wallet lookup for 10 min (more coins reach the Analyst each cycle)
     # Perf (no effect on rules): parallel I/O, background GeckoTerminal discovery, RPC cache for revoked mints
     http_workers=6, filter_workers=4, gt_refresh_s=420, rpc_revoked_cache_s=3600,
     old_mint_cache_s=1800,  # skip re-pricing mints already killed as pair-too-old; TTL so a new pair is still seen
@@ -55,7 +56,7 @@ CFG = dict(
     fast_stop_poll_s=10,     # SHADOW ONLY: Jupiter price/v3 poll of open positions (log only, never closes a trade)
     pumpportal_ws=True,      # SHADOW ONLY: free PumpPortal migration stream, logged and measured, NOT added to Scout
     # v4 (user-approved): Helius reserve prices are the LIVE exit trigger when healthy; same rule levels.
-    helius_ws_live=True, ws_max_dev_pct=8.0, ws_silent_s=15, helius_ws_daily_credits=6000, ws_poll_post_watch_s=300,
+    helius_ws_live=True, ws_max_dev_pct=8.0, ws_silent_s=15, helius_ws_daily_credits=9000, ws_poll_post_watch_s=300,
 )
 # Shadow-only exit variants. Log only: never read by live Executor/Risk. Do not put these in CFG.
 SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the live trail, then 4% under the peak (live uses 6%)
@@ -63,7 +64,27 @@ SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the li
 SHADOW_ENTRY_V5 = dict(organic_50=50.0, churn_50=0.5, churn_max_age_h=24.0, m5_chase_10=10.0, top1_10=10.0)
 SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03), breakeven_8=dict(arm=0.08, lock_gain=0.01),
                       old_rules_v5=dict(stop=0.06, activate=0.12, dist=0.06, base="fill"))   # v6: what the pre-v6 exit rules would have done
-OLD_RULES_V5 = dict(min_liq=40_000, max_pos_frac=0.08, stop_pct=0.06, smart_zero_counts=True)   # pre-v6 live values, shadow reference only
+OLD_RULES_V5 = dict(min_liq=40_000, max_pos_frac=0.08, stop_pct=0.06, smart_zero_counts=True, pass_score=70.0)   # pre-v6 live values, shadow reference only
+RULESET = "v8_loose"   # tag stored on every score row and position (compare rule sets / score buckets later)
+# v8: the v6/v7 LIVE entry rules, kept as a SHADOW reference (log only). Every v8 entry records whether these would have allowed it.
+STRICT_V7 = dict(pass_score=70.0, min_liq=100_000, min_vol_h1=50_000, min_mcap=300_000, max_mcap=20_000_000, max_age_h=72.0,
+                 max_h1_change=80.0, max_top10_pct=25.0, max_dev_pct=3.0, max_bundle_pct=10.0)
+def strict_v7_reasons(c, checks, score):
+    """-> list of reasons the v7 strict live entry rules would have rejected this candidate ([] = would pass)."""
+    S = STRICT_V7; r = []; v1 = (c.vol or {}).get("h1"); ch1 = (c.price_change or {}).get("h1"); checks = checks or {}
+    if score is None or score < S["pass_score"]: r.append(f"score {score} < 70")
+    if (c.liq_usd or 0) < S["min_liq"]: r.append("liquidity < $100k")
+    if v1 is None or v1 < S["min_vol_h1"]: r.append("1h volume < $50k")
+    if not (S["min_mcap"] <= (c.mcap or 0) <= S["max_mcap"]): r.append("mcap outside $300k-$20M")
+    if c.age_h is None or c.age_h > S["max_age_h"]: r.append("pair older than 72h")
+    if ch1 is not None and ch1 > S["max_h1_change"]: r.append("already > +80% in 1h")
+    for k, lim, lab in (("top10_pct_ex_pools", S["max_top10_pct"], "top-10 > 25%"), ("dev_pct", S["max_dev_pct"], "dev > 3%"),
+                        ("bundle_pct_proxy", S["max_bundle_pct"], "bundle/insider > 10%")):
+        v = checks.get(k)
+        if v is not None and v > lim: r.append(lab)
+    return r
+def score_bucket(s):
+    return None if s is None else ("<55" if s < 55 else "55-60" if s < 60 else "60-65" if s < 65 else "65-70" if s < 70 else "70+")
 
 UA = {"User-Agent": "memedesk-paper/1.0", "Accept": "application/json"}
 BURN_ADDRS = {"1nc1nerator11111111111111111111111111111111", "11111111111111111111111111111111"}
@@ -432,6 +453,7 @@ class PaperOrder:
     mint: str; symbol: str; pair_address: str; ref_price: float; fill_price: float
     size_usd: float; qty: float; slippage_pct: float; stop_price: float
     score: float; equity_at_entry: float; created_at: float
+    meta: Optional[dict] = None   # v8: entry features (ruleset, score bucket, market + filter values, strict_v7 verdict)
 
 # ---------------------------------------------------------------- Logger (stage 6)
 class Logger:
@@ -464,6 +486,9 @@ class Logger:
         CREATE INDEX IF NOT EXISTS holders_mint_ts ON holders(mint, ts);
         """)
         SWL.ensure_schema(self.db)
+        for tbl, col in (("positions", "ruleset TEXT"), ("positions", "entry_meta TEXT"), ("scores", "ruleset TEXT")):   # v8 tags
+            try: self.db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col}")
+            except sqlite3.OperationalError: pass   # already there
         if self.db.execute("SELECT v FROM ledger WHERE k='cash'").fetchone() is None:
             self.db.execute("INSERT INTO ledger VALUES('cash',?)", (CFG["start_equity"],))
         self.cycle = (self.db.execute("SELECT MAX(cycle) FROM cycles").fetchone()[0] or 0)
@@ -509,8 +534,8 @@ class Logger:
     def score(self, mint, symbol, score, passed, components):
         ts = now()
         with self.lock:
-            self.db.execute("INSERT INTO scores(ts,ts_iso,cycle,mint,symbol,score,passed,components) VALUES(?,?,?,?,?,?,?,?)",
-                            (ts, iso(ts), self.cycle, mint, symbol, score, int(passed), json.dumps(components)))
+            self.db.execute("INSERT INTO scores(ts,ts_iso,cycle,mint,symbol,score,passed,components,ruleset) VALUES(?,?,?,?,?,?,?,?,?)",
+                            (ts, iso(ts), self.cycle, mint, symbol, score, int(passed), json.dumps(components), RULESET))
         self.event("Analyst", "SCORE_PASS" if passed else "SCORE_FAIL", mint, symbol, score=score, components=components)
 
     def _maybe_rotate_jsonl(self):
@@ -670,11 +695,11 @@ class Scout:
             mcap = p.get("marketCap") or p.get("fdv") or 0
             reasons = []
             if age_h is None: reasons.append("data unavailable: pair age")
-            elif age_h < CFG["min_age_h"]: reasons.append(f"pair too young: {age_h*60:.0f}m < 30m")
-            elif age_h > CFG["max_age_h"]: reasons.append(f"pair too old: {age_h:.1f}h > 72h")
+            elif age_h < CFG["min_age_h"]: reasons.append(f"pair too young: {age_h*60:.0f}m < {CFG['min_age_h']*60:.0f}m")
+            elif age_h > CFG["max_age_h"]: reasons.append(f"pair too old: {age_h:.1f}h > {CFG['max_age_h']:.0f}h")
             if not mcap: reasons.append("data unavailable: market cap")
-            elif mcap < CFG["min_mcap"]: reasons.append(f"mcap ${mcap:,.0f} < $300k")
-            elif mcap > CFG["max_mcap"]: reasons.append(f"mcap ${mcap:,.0f} > $20M")
+            elif mcap < CFG["min_mcap"]: reasons.append(f"mcap ${mcap:,.0f} < ${CFG['min_mcap'] / 1000:.0f}k")
+            elif mcap > CFG["max_mcap"]: reasons.append(f"mcap ${mcap:,.0f} > ${CFG['max_mcap'] / 1e6:.0f}M")
             sym = p["baseToken"].get("symbol")
             if reasons:
                 scout_kills += 1
@@ -775,9 +800,9 @@ class Filter:
         if not liq: reasons.append("data unavailable: liquidity")
         elif liq < CFG["min_liq"]: reasons.append(f"liquidity ${liq:,.0f} < ${CFG['min_liq'] / 1000:.0f}k")
         if v1 is None: reasons.append("data unavailable: 1h volume")
-        elif v1 < CFG["min_vol_h1"]: reasons.append(f"1h volume ${v1:,.0f} < $50k")
+        elif v1 < CFG["min_vol_h1"]: reasons.append(f"1h volume ${v1:,.0f} < ${CFG['min_vol_h1'] / 1000:.0f}k")
         if ch1 is None: reasons.append("data unavailable: 1h price change")
-        elif ch1 > CFG["max_h1_change"]: reasons.append(f"already +{ch1:.0f}% in 1h (> +80%)")
+        elif ch1 > CFG["max_h1_change"]: reasons.append(f"already +{ch1:.0f}% in 1h (> +{CFG['max_h1_change']:.0f}%)")
         return reasons, checks
 
     def run(self, c: ScoutCandidate) -> Optional[FilterPass]:
@@ -842,7 +867,7 @@ class Filter:
             top10 = sum(float(h.get("pct") or 0) for h in real[:10])
             checks["top10_pct_ex_pools"] = round(top10, 2); checks["holders_excluded_as_pool_or_burn"] = len(holders) - len(real)
             checks["top1_pct_ex_pools"] = round(max((float(h.get("pct") or 0) for h in real), default=0.0), 2)   # v5: logged for shadow rules only
-            if top10 > CFG["max_top10_pct"]: reasons.append(f"top-10 holders {top10:.1f}% > 25%")
+            if top10 > CFG["max_top10_pct"]: reasons.append(f"top-10 holders {top10:.1f}% > {CFG['max_top10_pct']:.0f}%")
         # --- dev/creator holdings + past rugs
         creator = rc.get("creator")
         cb = rc.get("creatorBalance")
@@ -853,7 +878,7 @@ class Filter:
             dev_pct = max(dev_pct or 0, hp)
         checks["creator"] = creator; checks["dev_pct"] = None if dev_pct is None else round(dev_pct, 3)
         if dev_pct is None: reasons.append("data unavailable: creator balance")
-        elif dev_pct > CFG["max_dev_pct"]: reasons.append(f"dev holds {dev_pct:.1f}% > 3%")
+        elif dev_pct > CFG["max_dev_pct"]: reasons.append(f"dev holds {dev_pct:.1f}% > {CFG['max_dev_pct']:.0f}%")
         ctoks = rc.get("creatorTokens") or []
         dead = [t for t in ctoks if t.get("mint") != c.mint and float(t.get("marketCap") or 0) < CFG["past_rug_dead_mcap"]]
         rug_risks = [r.get("name") for r in (rc.get("risks") or []) if "rug" in (r.get("name") or "").lower()
@@ -872,7 +897,7 @@ class Filter:
         bundle = max(ins_hold, net_pct)
         checks["bundle_pct_proxy"] = round(bundle, 2); checks["insider_networks"] = len(rc.get("insiderNetworks") or [])
         checks["graph_insiders_detected"] = rc.get("graphInsidersDetected")
-        if bundle > CFG["max_bundle_pct"]: reasons.append(f"bundled/insider supply {bundle:.1f}% > 10%")
+        if bundle > CFG["max_bundle_pct"]: reasons.append(f"bundled/insider supply {bundle:.1f}% > {CFG['max_bundle_pct']:.0f}%")
         # --- RugCheck danger-level risks (e.g. mutable metadata / transfer fee / permanent delegate)
         danger = [r.get("name") for r in (rc.get("risks") or []) if (r.get("level") or "") == "danger"]
         checks["rugcheck_danger_risks"] = danger
@@ -897,7 +922,7 @@ class Filter:
 def clamp(x, a=0.0, b=100.0): return max(a, min(b, x))
 class Analyst:
     def __init__(self, log: Logger):
-        self.log = log; self.smart = SWL.SmartBook(log.db, log.lock)
+        self.log = log; self.smart = SWL.SmartBook(log.db, log.lock); self._smart_cache = {}
         self.smart.url = helius_rpc_url(); self.smart.wait = wait_not_critical   # v5: Helius smart-wallet lookups
         self.smart.rpc = lambda url, calls: HTTP.rpc_batch(url, calls, tries=2, priority=True, batch_size=10)
     def run(self, fp: FilterPass) -> Optional[AnalystPass]:
@@ -949,8 +974,16 @@ class Analyst:
         comp["liq_mcap"] = clamp(500 * lm); notes["liq_mcap"] = round(lm, 4)
         # smart wallets: distinct tracked smart wallets (free on-chain list, see smartwallets.py) that bought recently
         # 0 -> 0, 1 -> 45, 2 -> 75, 3+ -> 100. Lookup failure / list too small -> None -> renormalised (never penalises)
-        try: sv, sinfo = self.smart.factor(lambda u, **kw: HTTP.get(u, tries=2, priority=True, **kw), c.mint, c.pair_address, c.price_usd)
-        except Exception as e: sv, sinfo = None, dict(status=f"error {e!r}: factor skipped, weights renormalised")
+        hit = self._smart_cache.get(c.mint)
+        if hit and now() - hit[0] < (CFG.get("smart_cache_s") or 0):   # v8 perf: same lookup reused for a few cycles
+            sv, sinfo = hit[1], dict(hit[2], cached_s=round(now() - hit[0]))
+        else:
+            try: sv, sinfo = self.smart.factor(lambda u, **kw: HTTP.get(u, tries=2, priority=True, **kw), c.mint, c.pair_address, c.price_usd)
+            except Exception as e: sv, sinfo = None, dict(status=f"error {e!r}: factor skipped, weights renormalised")
+            if sv is not None:
+                self._smart_cache[c.mint] = (now(), sv, sinfo if isinstance(sinfo, dict) else {})
+                if len(self._smart_cache) > 500:
+                    for k in [k for k, v in self._smart_cache.items() if now() - v[0] > (CFG.get("smart_cache_s") or 0)]: self._smart_cache.pop(k, None)
         comp["smart_wallets"] = sv; notes["smart_wallets"] = sinfo
         W = CFG["weights"]; tw = sum(w for k, w in W.items() if comp.get(k) is not None and w > 0)
         score_old = round(sum(comp[k] * w for k, w in W.items() if comp.get(k) is not None and w > 0) / tw, 1)   # pre-v6 formula
@@ -969,7 +1002,7 @@ class Analyst:
         passed = score >= CFG["pass_score"]
         self.log.score(c.mint, c.symbol, score, passed, components)
         if not passed:
-            self.log.kill("Analyst", c.mint, c.symbol, c.pair_address, [f"score {score} < 70"],
+            self.log.kill("Analyst", c.mint, c.symbol, c.pair_address, [f"score {score} < {CFG['pass_score']:.0f}"],
                           {k: v for k, v in components.items() if not k.startswith("_")})
             return None
         return AnalystPass(fp=fp, score=score, components=components, analysed_at=now())
@@ -982,6 +1015,20 @@ class Executor:
         cash = self.log.db.execute("SELECT v FROM ledger WHERE k='cash'").fetchone()[0]
         mtm = sum(q * (lp or ep) for q, lp, ep in self.log.db.execute("SELECT qty,last_price,entry_price FROM positions WHERE status='OPEN'"))
         return cash, cash + mtm
+    def _entry_meta(self, ap, liq, ref):
+        try:
+            c = ap.fp.cand; ck = ap.fp.checks or {}; sr = strict_v7_reasons(c, ck, ap.score)
+            return dict(ruleset=RULESET, score=ap.score, score_bucket=score_bucket(ap.score), score_old=ap.components.get("_score_old"),
+                        components={k: v for k, v in ap.components.items() if not k.startswith("_")},
+                        smart_count=((ap.components.get("_inputs") or {}).get("smart_wallets") or {}).get("count") if isinstance((ap.components.get("_inputs") or {}).get("smart_wallets"), dict) else None,
+                        liq_usd=liq, scout_liq_usd=c.liq_usd, mcap=c.mcap, age_h=c.age_h, vol_h1=(c.vol or {}).get("h1"), vol_h24=(c.vol or {}).get("h24"),
+                        chg_m5=(c.price_change or {}).get("m5"), chg_h1=(c.price_change or {}).get("h1"), chg_h6=(c.price_change or {}).get("h6"),
+                        top10=ck.get("top10_pct_ex_pools"), top1=ck.get("top1_pct_ex_pools"), dev_pct=ck.get("dev_pct"), bundle=ck.get("bundle_pct_proxy"),
+                        lp_primary=ck.get("lp_primary_locked_pct"), lp_weighted=ck.get("lp_weighted_locked_pct"),
+                        organic=(ap.components.get("_inputs") or {}).get("jupiter_organic_score"), dex=c.dex, sources=list(c.sources),
+                        strict_v7_pass=not sr, strict_v7_reasons=sr)
+        except Exception as e:
+            return dict(ruleset=RULESET, score=ap.score, error=repr(e)[:120])
     def run(self, ap: AnalystPass) -> Optional[PaperOrder]:
         assert isinstance(ap, AnalystPass)
         c = ap.fp.cand
@@ -1017,7 +1064,8 @@ class Executor:
                            jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
             order = PaperOrder(mint=c.mint, symbol=c.symbol, pair_address=c.pair_address, ref_price=ref, fill_price=fill,
                                size_usd=round(size, 2), qty=size / fill, slippage_pct=round(slip * 100, 3),
-                               stop_price=ref * (1 - CFG["stop_pct"]), score=ap.score, equity_at_entry=round(eq, 2), created_at=now())
+                               stop_price=ref * (1 - CFG["stop_pct"]), score=ap.score, equity_at_entry=round(eq, 2), created_at=now(),
+                               meta=self._entry_meta(ap, liq, ref))
             self.risk.open(order)   # stop is attached atomically with the order inside Risk.open
             return order
 
@@ -1040,9 +1088,10 @@ class Risk:
             db.execute("BEGIN IMMEDIATE")
             try:
                 db.execute("""INSERT INTO positions(mint,symbol,pair,status,opened_ts,opened_iso,ref_price,entry_price,size_usd,qty,entry_slip_pct,
-                    initial_stop,stop_price,peak_price,trail_active,last_price,last_ts,score) VALUES(?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
+                    initial_stop,stop_price,peak_price,trail_active,last_price,last_ts,score,ruleset,entry_meta) VALUES(?,?,?,'OPEN',?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)""",
                     (o.mint, o.symbol, o.pair_address, o.created_at, iso(o.created_at), o.ref_price, o.fill_price, o.size_usd, o.qty,
-                     o.slippage_pct, o.stop_price, o.stop_price, o.ref_price, o.ref_price, now(), o.score))   # v6: peak starts at the market price
+                     o.slippage_pct, o.stop_price, o.stop_price, o.ref_price, o.ref_price, now(), o.score, RULESET,
+                     json.dumps(o.meta, default=str) if o.meta else None))   # v6: peak starts at the market price
                 db.execute("UPDATE ledger SET v=v-? WHERE k='cash'", (o.size_usd,))
                 db.execute("COMMIT")
             except Exception:
@@ -1772,8 +1821,10 @@ class Desk:
                 m5_chase_10=(m5, None if m5 is None else m5 > E["m5_chase_10"], f"buying after > +{E['m5_chase_10']:.0f}% in 5 min (chasing)"),
                 top1_10=(top1, None if top1 is None else top1 > E["top1_10"], f"largest non-pool holder > {E['top1_10']:.0f}%"))
             so = ap.components.get("_score_old")
-            gates["old_rules_v5"] = (so, None if so is None else so < CFG["pass_score"],
-                                     f"pre-v6 score (smart 0 counted as 0) < {CFG['pass_score']:.0f}; old size 8% of equity, no liquidity cap")
+            gates["old_rules_v5"] = (so, None if so is None else so < OLD_RULES_V5["pass_score"],
+                                     f"pre-v6 score (smart 0 counted as 0) < {OLD_RULES_V5['pass_score']:.0f}; old size 8% of equity, no liquidity cap")
+            sr = strict_v7_reasons(c, ap.fp.checks, ap.score)   # v8: would the v6/v7 strict live entry rules have taken it?
+            gates["strict_v7"] = (score_bucket(ap.score), bool(sr), "v7 strict entry: " + ("; ".join(sr) if sr else "would also pass"))
             for rule, (val, blk, why) in gates.items():
                 SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, rule, "ENTRY_GATE", c.mint, c.symbol, pid,
                                  cycle=self.log.cycle, score=ap.score, value=val, would_block=blk, entered=bool(order), rule_text=why)
@@ -1828,7 +1879,7 @@ class Desk:
         self.log.cycle_done(st)
         print(iso(), "cycle", self.log.cycle, st, flush=True)
     def main(self, once=False):
-        self.log.event("Logger", "DESK_START", mode="PAPER", cfg=CFG)
+        self.log.event("Logger", "DESK_START", mode="PAPER", ruleset=RULESET, cfg=CFG, strict_v7_shadow=STRICT_V7)
         if once:   # test mode: a single cycle, no risk thread
             self.cycle(); print("http", HTTP.stats, flush=True); return
         threading.Thread(target=self.risk_loop, daemon=True).start()

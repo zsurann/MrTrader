@@ -141,6 +141,35 @@ Durante l'incidente v6 tutti i cicli fallivano ma l'heartbeat del syncer continu
 
 Le regole di trading non cambiano.
 
+## Regole di ingresso v8_loose (approvate dall'utente, 2026-11-18 14:12 Europe/Rome)
+
+Solo paper. L'utente ha chiesto molte più operazioni con soldi finti, per raccogliere dati e scegliere tra regole live, smart wallet e ombra. Cambiano solo le regole di INGRESSO; le uscite restano uguali (stop −10% dal prezzo di mercato all'ingresso, trailing da +12% con distanza 6%, uscite in tempo reale con Helius e fallback DexScreener). Tutte le regole ombra continuano a registrare. Deploy con `memedesk-safe-restart` (0 posizioni aperte). Backup: `/opt/memedesk/pre_v8/`.
+
+| parametro | v6/v7 | v8_loose |
+| --- | --- | --- |
+| soglia score | 70 | 55 |
+| liquidità minima | 100k $ | 25k $ |
+| volume 1h minimo | 50k $ | 15k $ |
+| mcap minima (Scout) | 300k $ | 100k $ |
+| età massima (Scout) | 72 h | 168 h |
+| già salita in 1h | +80% | +150% |
+| top 10 holder | 25% | 35% |
+| quota dev | 3% | 5% |
+| bundle/insider | 10% | 20% |
+| taglia | 5% dell'equity | 3% dell'equity (sempre ≤ cash e ≤ 0,25% della liquidità) |
+| posizioni aperte max | 10 | 15 |
+| cooldown di rientro | 6 h | 1 h |
+| budget WS Helius/giorno | 6000 | 9000 |
+| cache fattore smart (nuova, prestazioni) | — | 600 s |
+
+Restano: mint/freeze revocate, LP bruciata/bloccata, RugCheck rugged, rug passati del dev, transfer fee, permanent delegate, fail-closed sui dati mancanti.
+
+Ogni trade ha `positions.ruleset = 'v8_loose'` e `positions.entry_meta` (JSON con score, fascia di score `55-60`/`60-65`/`65-70`/`70+`, componenti, liquidità, mcap, età, volumi, controlli Filter, `strict_v7_pass`). Ogni score ha `scores.ruleset`. Nuova regola ombra `strict_v7` in `shadow_events`: dice se le vecchie regole v6/v7 avrebbero bloccato l'ingresso. `old_rules_v5` mantiene la soglia storica 70.
+
+Baseline prima di v8 (ultime 24 h): 0 trade; ~10,7 coin per ciclo nella finestra Scout, 0,1 passaggi Filter per ciclo, 4 coin con score (massimo 60–65). Primo ciclo dopo il deploy: 6 ingressi; 8 nei primi 10 minuti.
+
+Rollback (solo con 0 posizioni aperte): ricopiare `pre_v8/*.py` e `sudo memedesk-safe-restart`.
+
 ## Servizi disattivati sulla VM Oracle (si possono riaccendere)
 
 - `open-vm-tools`, `ModemManager`, `apport`: `sudo systemctl enable --now NOME`

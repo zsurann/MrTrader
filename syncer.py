@@ -34,15 +34,15 @@ def ts(x):
     return None if x is None else datetime.fromtimestamp(float(x), timezone.utc).isoformat()
 
 # ---------------------------------------------------------------- reason -> chart category (Italian UI)
-CATS = [
-    (r"pair too young", "età < 30m"), (r"pair too old", "età > 72h"),
-    (r"mcap .*< \$300k", "mcap < $300k"), (r"mcap .*> \$20M", "mcap > $20M"),
-    (r"^liquidity", "liquidità < $100k"), (r"^1h volume", "volume 1h < $50k"),
-    (r"^already \+", "già +80% in 1h"), (r"mint authority NOT", "mint non revocato"),
+CATS = [   # v8: labels follow the thresholds in desk.CFG (v8_loose since 2026-11-18)
+    (r"pair too young", "età < 30m"), (r"pair too old", "età oltre il massimo"),
+    (r"mcap .*< \$", "mcap sotto il minimo"), (r"mcap .*> \$", "mcap > $20M"),
+    (r"^liquidity", "liquidità sotto il minimo"), (r"^1h volume", "volume 1h sotto il minimo"),
+    (r"^already \+", "già pompata in 1h"), (r"mint authority NOT", "mint non revocato"),
     (r"freeze authority NOT", "freeze non revocato"), (r"LP not burned", "LP non bruciata/bloccata"),
-    (r"^top-10", "top10 > 25%"), (r"^dev holds", "dev > 3%"), (r"past rugs|rugged", "rug passati / rugged"),
-    (r"bundled", "bundle/insider > 10%"), (r"permanent delegate|transfer fee", "token-2022 rischioso"),
-    (r"^score ", "score < 70"), (r"^data unavailable", "dati mancanti"),
+    (r"^top-10", "top10 troppo alta"), (r"^dev holds", "quota dev troppo alta"), (r"past rugs|rugged", "rug passati / rugged"),
+    (r"bundled", "bundle/insider troppo alto"), (r"permanent delegate|transfer fee", "token-2022 rischioso"),
+    (r"^score ", "score sotto soglia"), (r"^data unavailable", "dati mancanti"),
 ]
 CATS = [(re.compile(p), c) for p, c in CATS]
 def category(reason):
