@@ -25,7 +25,8 @@ export type ShadowB = { watched: number; triggered: number; compared: number; ac
 export type BoardRow = { kind: string; rule: string; n: number; blocked: number | null; live: number; shadow: number; delta: number;
   ci_lo?: number | null; ci_hi?: number | null };
 export type BoardStats = { trades: number; win_rate: number; avg_win: number | null; avg_loss: number | null; profit_factor: number | null;
-  expectancy: number | null; max_drawdown: number; entry_slip_pct: number | null; exit_slip_pct: number | null; mfe_pct: number | null; mae_pct: number | null };
+  expectancy: number | null; max_drawdown: number; entry_slip_pct: number | null; exit_slip_pct: number | null; mfe_pct: number | null; mae_pct: number | null;
+  stop_gap_pct?: number | null; stop_gap_worst_pct?: number | null };
 export type Board = { positions: number; live_pnl: number; rows: BoardRow[]; stats?: BoardStats | null };
 export type Smart = {
   id: number; updated_at: string; list_size: number; tracked: number; tokens_done: number; tokens_skipped: number; blacklisted: number;

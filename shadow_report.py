@@ -69,7 +69,7 @@ def stats(db, where, args):
     """Live performance of the same closed trades: the numbers a desk is judged on."""
     cols = {r[1] for r in db.execute("PRAGMA table_info(positions)")}
     tr = "trough_price" if "trough_price" in cols else "NULL"
-    r = db.execute(f"SELECT pnl_usd, entry_slip_pct, exit_ref, exit_price, entry_price, peak_price, {tr} FROM positions "
+    r = db.execute(f"SELECT pnl_usd, entry_slip_pct, exit_ref, exit_price, entry_price, peak_price, {tr}, stop_price, exit_reason FROM positions "
                    f"WHERE {where} ORDER BY closed_ts", args).fetchall()
     if not r: return None
     pnl = [x[0] or 0.0 for x in r]; w = [p for p in pnl if p > 0]; l = [p for p in pnl if p <= 0]
@@ -81,7 +81,10 @@ def stats(db, where, args):
                 entry_slip_pct=avg([x[1] for x in r if x[1] is not None]),
                 exit_slip_pct=avg([100 * (1 - x[3] / x[2]) for x in r if x[2] and x[3]]),
                 mfe_pct=avg([100 * (x[5] / x[4] - 1) for x in r if x[4] and x[5]]),
-                mae_pct=avg([100 * (x[6] / x[4] - 1) for x in r if x[4] and x[6]]))
+                mae_pct=avg([100 * (x[6] / x[4] - 1) for x in r if x[4] and x[6]]),
+                # how far below its stop each stop/trailing/breakeven exit actually filled (0 = exactly at the stop)
+                stop_gap_pct=avg(g := [100 * (x[3] / x[7] - 1) for x in r if x[3] and x[7] and x[8] and x[8].startswith(("stop", "trailing", "breakeven"))]),
+                stop_gap_worst_pct=round(min(g), 2) if g else None)
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()

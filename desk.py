@@ -1925,6 +1925,7 @@ class Desk:
             except Exception as e: self.log.event("Shadow", "ERROR", rule="v9_gates", error=repr(e)[:200])
             for k in ("old_rules_v5", "new_pair_6h", "buy_pressure"): gates.pop(k, None)   # v10: live now, no longer shadow
             gates["fomo_score_70"] = (ap.score, ap.score < 70.0, "fomo TikTok bot: every entry shown had Analyst score >= 70")
+            gates["liq_100k"] = (c.liq_usd, (c.liq_usd or 0) < 100_000, "pool liquidity >= $100k (deeper pool = smaller gap below the stop)")
             if order:   # v11: only decidable for real entries (the quote is taken by the Executor)
                 lim = CFG["shadow_max_entry_slip_pct"]
                 gates["entry_slip_15"] = (order.slippage_pct, order.slippage_pct > lim, f"skip if the fill is > {lim}% above the market price")

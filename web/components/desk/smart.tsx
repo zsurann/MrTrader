@@ -42,6 +42,7 @@ function BoardTable({ title, b }: { title: string; b: Board | null }) {
             <span>perdita media <b className="text-loss">{signedUsd(b.stats.avg_loss)}</b></span>
             <span>costo ingresso <b>{b.stats.entry_slip_pct ?? "—"}%</b> · uscita <b>{b.stats.exit_slip_pct ?? "—"}%</b></span>
             <span>MFE <b className="text-profit">{b.stats.mfe_pct ?? "—"}%</b> · MAE <b className="text-loss">{b.stats.mae_pct ?? "—"}%</b></span>
+            <span className="col-span-2">uscita sotto lo stop: media <b className="text-loss">{b.stats.stop_gap_pct ?? "—"}%</b> · peggiore <b className="text-loss">{b.stats.stop_gap_worst_pct ?? "—"}%</b></span>
           </div>) : null}
         {!b.rows.length ? <p className="text-xs text-muted-foreground">nessun confronto ancora</p> : (
           <div className="max-h-96 overflow-auto">
