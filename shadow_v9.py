@@ -34,6 +34,8 @@ EXIT_V9 = {
     # "fomo" TikTok bot (2026-11-19 video, screenshots only): Risk card shows stop -6%; take-profits seen +8%..+171%.
     # shortcut: the trail (10% from +15%) is our guess of their take-profit logic, refine if their rules ever become public.
     "fomo_stop6_trail10":  dict(stop=0.06, activate=0.15, dist=0.10),
+    # "Grok Bot" TikTok video (same app): cards read "stop -6%", "trail +12%", "exit if it drops 12% from top", size 8% of stack.
+    "grok_stop6_trail12":  dict(stop=0.06, activate=0.12, dist=0.12),
 }
 # Shadow entry ideas (ghost uses the live exit rules: LIVE_EXIT).
 ENTRY_V9 = {
@@ -181,7 +183,7 @@ class GhostBook:
             if peak >= ref * (1 + P.get("activate", 0.12)): stop = max(stop, peak * (1 - dist))
             if P.get("be_arm") and peak >= g["entry_px"] * (1 + P["be_arm"]): stop = max(stop, g["entry_px"] * (1 + P["be_lock"]))
             return px <= stop
-        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10"):
+        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10", "grok_stop6_trail12"):
             if live_like(P["dist"]): out.append((rem, "live_rules_stop"))
         elif rule == "tp2x_half_trail25":
             if "tp" not in st["steps"] and px >= ref * P["tp_x"]:

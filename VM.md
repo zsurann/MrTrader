@@ -79,6 +79,7 @@ Su richiesta dell'utente: nuovo `RULESET` → al primo avvio con 0 posizioni il 
 ### Ombra "fomo" (solo log, 2026-11-19)
 
 Dal video TikTok di un bot "fomo" (solo schermate, nessuna regola pubblica): ingresso `fomo_score_70` (score ≥ 70) e uscita ghost `fomo_stop6_trail10` (stop −6%, trailing 10% da +15%; il trailing è una nostra ipotesi). La loro taglia, 25–40% del saldo per trade, non è copiata: cambierebbe il rischio, non l'esito percentuale del trade.
+Secondo video ("Grok Bot", stessa app): regole leggibili sulle carte, uscita ghost `grok_stop6_trail12` (stop −6%, trailing 12% dal massimo da +12%), taglia 8% del saldo (non copiata); l'ingresso con score ≥ 70 è già `fomo_score_70`.
 
 ### Nuove regole ombra v10 (solo log, 2026-11-19)
 
