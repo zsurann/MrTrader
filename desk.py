@@ -45,7 +45,9 @@ CFG = dict(
     stop_pct=0.10, trail_activate=0.12, trail_dist=0.04, risk_poll_s=30,   # v10: trail 6% -> 4% (ex-shadow trail_4pct)
     be_arm=0.08, be_lock=0.01,   # v10: once the peak passes +8% over the fill, stop >= fill +1% (ex-shadow breakeven_8)
     min_score_old=70.0,          # v10: pre-v6 score (smart 0 counts as 0) must also be >= 70 (ex-shadow old_rules_v5 entry)
-    crash_quote_max_impact_pct=5.0,   # v10.1: sells take a Jupiter quote below the 50% band when its route impact is <= this
+    crash_quote_max_impact_pct=5.0,
+    net_fee_usd=0.05,   # v11: Solana network cost per swap (base + priority fee, no Jito tip), added to every paper buy and sell
+    shadow_max_entry_slip_pct=1.5,   # v11 SHADOW gate: skip entries whose fill is > 1.5% above the market price   # v10.1: sells take a Jupiter quote below the 50% band when its route impact is <= this
     smart_exit_live=True,        # v10: close when a tracked smart wallet sells the coin (ex-shadow smart_exit)
       # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
     # Loop
@@ -76,7 +78,7 @@ SHADOW_ENTRY_V5 = dict(organic_50=50.0, churn_50=0.5, churn_max_age_h=24.0, m5_c
 SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03),   # v10: breakeven_8 is live now
                       old_rules_v5=dict(stop=0.06, activate=0.12, dist=0.06, base="fill"))   # v6: what the pre-v6 exit rules would have done
 OLD_RULES_V5 = dict(min_liq=40_000, max_pos_frac=0.08, stop_pct=0.06, smart_zero_counts=True, pass_score=70.0)   # pre-v6 live values, shadow reference only
-RULESET = "v10_sel"   # tag stored on every score row and position (compare rule sets / score buckets later)
+RULESET = "v11_clean"   # v11: fresh 1000 $ ledger + network fees in every paper fill   # tag stored on every score row and position (compare rule sets / score buckets later)
 # v8: the v6/v7 LIVE entry rules, kept as a SHADOW reference (log only). Every v8 entry records whether these would have allowed it.
 STRICT_V7 = dict(pass_score=70.0, min_liq=100_000, min_vol_h1=50_000, min_mcap=300_000, max_mcap=20_000_000, max_age_h=72.0,
                  max_h1_change=80.0, max_top10_pct=25.0, max_dev_pct=3.0, max_bundle_pct=10.0)
@@ -472,8 +474,11 @@ def paper_sell_fill(mint, qty, ref, liq, reuse=None, liq_fallback=None):
             q.get("impact_pct") is not None and q["impact_pct"] <= CFG["crash_quote_max_impact_pct"]:
         # v10.1: a low-impact Jupiter route far below the ref means the ref is stale after a crash/rug (DCTC #218:
         # DexScreener -35%, Jupiter -63% at 0.5% impact). Take the worse, real price instead of the model.
-        return q["price"], "jupiter_crash", model_px, q
-    return sane_exit(exit_px, ref), src, model_px, q
+        return net_of_fee(q["price"], qty), "jupiter_crash", model_px, q
+    return net_of_fee(sane_exit(exit_px, ref), qty), src, model_px, q
+def net_of_fee(px, qty):
+    """v11: Solana network fee per swap folded into the paper price, so live, shadows and ghosts all pay it."""
+    return max(0.0, px - CFG["net_fee_usd"] / qty) if qty else px
 
 
 # ---------------------------------------------------------------- Typed handoff records
@@ -532,7 +537,8 @@ class Logger:
         CREATE INDEX IF NOT EXISTS holders_mint_ts ON holders(mint, ts);
         """)
         SWL.ensure_schema(self.db)
-        for tbl, col in (("positions", "ruleset TEXT"), ("positions", "entry_meta TEXT"), ("scores", "ruleset TEXT")):   # v8 tags
+        for tbl, col in (("positions", "ruleset TEXT"), ("positions", "entry_meta TEXT"), ("scores", "ruleset TEXT"),   # v8 tags
+                         ("positions", "trough_price REAL")):   # v11: lowest price seen while open (MAE)
             try: self.db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col}")
             except sqlite3.OperationalError: pass   # already there
         if self.db.execute("SELECT v FROM ledger WHERE k='cash'").fetchone() is None:
@@ -1126,6 +1132,7 @@ class Executor:
             if q and 0.9 <= q["price"] / ref <= 1.15:   # sanity band vs fresh DexScreener price; else keep model
                 fill, fill_src = max(q["price"], ref * (1 + 0.0005)), "jupiter"
                 slip = fill / ref - 1
+            fill *= 1 + CFG["net_fee_usd"] / size   # v11: network fee on the buy
             self.log.event("Executor", "FILL_QUOTE", c.mint, c.symbol, side="buy", size_usd=round(size, 2), ref_price=ref,
                            modeled_slip_pct=round(100 * (model_fill / ref - 1), 3),
                            quoted_slip_pct=(round(100 * (q["price"] / ref - 1), 3) if q else None),
@@ -1364,8 +1371,8 @@ class Risk:
                     db = self.log.db; db.execute("BEGIN IMMEDIATE")
                     try:   # same all-or-nothing pattern as Risk.open: a failed write must never leave the shared connection mid-transaction
                         db.execute("""UPDATE positions SET status='CLOSED',last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=?,
-                            closed_ts=?,closed_iso=?,exit_ref=?,exit_price=?,exit_reason=?,pnl_usd=?,pnl_pct=? WHERE id=? AND status='OPEN'""",
-                            (px, now(), new_peak, new_stop, int(new_trail), now(), iso(), px, exit_px, reason, pnl, 100 * pnl / size, pid))
+                            closed_ts=?,closed_iso=?,exit_ref=?,exit_price=?,exit_reason=?,pnl_usd=?,pnl_pct=?,trough_price=MIN(COALESCE(trough_price,?),?) WHERE id=? AND status='OPEN'""",
+                            (px, now(), new_peak, new_stop, int(new_trail), now(), iso(), px, exit_px, reason, pnl, 100 * pnl / size, px, px, pid))
                         db.execute("UPDATE ledger SET v=v+? WHERE k='cash'", (proceeds,)); db.execute("COMMIT")
                     except Exception:
                         db.execute("ROLLBACK"); raise
@@ -1391,8 +1398,9 @@ class Risk:
             if changed or src == "dexscreener_poll" or now() - self._last_write.get(pid, 0) >= 5:
                 self._last_write[pid] = now()
                 with self.log.lock:
-                    self.log.db.execute("UPDATE positions SET last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=? WHERE id=? AND status='OPEN'",
-                                        (px, now(), new_peak, new_stop, int(new_trail), pid))
+                    self.log.db.execute("UPDATE positions SET last_price=?,last_ts=?,peak_price=?,stop_price=?,trail_active=?,"
+                                        "trough_price=MIN(COALESCE(trough_price,?),?) WHERE id=? AND status='OPEN'",
+                                        (px, now(), new_peak, new_stop, int(new_trail), px, px, pid))
             return False
 
     def _source(self, pid, mint, sym, ok, why):
@@ -1789,6 +1797,10 @@ class HeliusFeed:
         best = min(devs.items(), key=lambda kv: abs(kv[1]))
         st["devs"] = (st.get("devs", []) + [round(best[1], 2)])[-50:]
         if abs(best[1]) > (CFG.get("ws_max_dev_pct") or 8.0):
+            # v11: in a crash the pool reserves move first and DexScreener/Jupiter lag. Keep the real-time feed when the
+            # reserve price is BELOW the references and a fresh RPC snapshot (<= 90 s, within 3%) confirms the decoding.
+            if best[1] < 0 and st.get("resync_dev") is not None and abs(st["resync_dev"]) <= 3 and now() - st.get("last_resync", 0) <= 90:
+                return True, f"ok (crash: reserve {best[1]:+.1f}% vs {best[0]}, RPC-confirmed)"
             return False, f"reserve price {best[1]:+.1f}% vs {best[0]} (>{CFG.get('ws_max_dev_pct') or 8.0}%)"
         return True, f"ok ({best[0]} {best[1]:+.2f}%)"
     # ---- thread
@@ -1912,6 +1924,9 @@ class Desk:
             try: gates.update(SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint)))   # v9 shadow entry gates (log only)
             except Exception as e: self.log.event("Shadow", "ERROR", rule="v9_gates", error=repr(e)[:200])
             for k in ("old_rules_v5", "new_pair_6h", "buy_pressure"): gates.pop(k, None)   # v10: live now, no longer shadow
+            if order:   # v11: only decidable for real entries (the quote is taken by the Executor)
+                lim = CFG["shadow_max_entry_slip_pct"]
+                gates["entry_slip_15"] = (order.slippage_pct, order.slippage_pct > lim, f"skip if the fill is > {lim}% above the market price")
             if order and self.ghosts and pid:
                 try: self.ghosts.on_live_entry(pid, order, ap)   # v9 ghost exit variants for this live entry
                 except Exception as e: self.log.event("Shadow", "ERROR", rule="ghost_v9_entry", error=repr(e)[:200])
@@ -1989,7 +2004,9 @@ class Desk:
         self.log.cycle_done(st)
         print(iso(), "cycle", self.log.cycle, st, flush=True)
     def main(self, once=False):
-        self.log.event("Logger", "DESK_START", mode="PAPER", ruleset=RULESET, cfg=CFG, strict_v7_shadow=STRICT_V7)
+        with self.log.lock: ep = self.log.db.execute("SELECT v FROM ledger WHERE k='epoch_ts'").fetchone()
+        self.log.event("Logger", "DESK_START", mode="PAPER", ruleset=RULESET, cfg=dict(CFG, epoch_ts=ep[0] if ep else None, ruleset=RULESET),
+                       strict_v7_shadow=STRICT_V7)
         if self.log.reset: self.log.event("Logger", "LEDGER_RESET", ruleset=RULESET, cash=CFG["start_equity"])
         if once:   # test mode: a single cycle, no risk thread
             self.cycle(); print("http", HTTP.stats, flush=True); return

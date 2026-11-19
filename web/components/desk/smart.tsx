@@ -31,7 +31,18 @@ function BoardTable({ title, b }: { title: string; b: Board | null }) {
         <Badge variant="outline" className="ml-auto border-violet/30 bg-violet/10 text-violet">solo log</Badge>
       </div>
       {!b ? <p className="text-xs text-muted-foreground">in attesa dei dati…</p> : (<>
-        <p className="num text-xs text-muted-foreground">{int(b.positions)} trade chiusi · PnL live <span className={tone(b.live_pnl)}>{signedUsd(b.live_pnl)}</span> · differenza &gt; 0 = la regola ombra avrebbe fatto meglio</p>
+        <p className="num text-xs text-muted-foreground">{int(b.positions)} trade chiusi · PnL live <span className={tone(b.live_pnl)}>{signedUsd(b.live_pnl)}</span> · differenza &gt; 0 = la regola ombra avrebbe fatto meglio; ✓ = anche il caso sfavorevole (intervallo 90%) è positivo</p>
+        {b.stats ? (
+          <div className="num grid grid-cols-2 gap-x-3 gap-y-1 rounded-md bg-muted/30 p-2 text-[0.75rem] sm:grid-cols-4">
+            <span>vincenti <b>{b.stats.win_rate}%</b></span>
+            <span>profit factor <b>{b.stats.profit_factor ?? "—"}</b></span>
+            <span>media/trade <b className={tone(b.stats.expectancy)}>{signedUsd(b.stats.expectancy)}</b></span>
+            <span>drawdown max <b className="text-loss">{signedUsd(b.stats.max_drawdown)}</b></span>
+            <span>vincita media <b className="text-profit">{signedUsd(b.stats.avg_win)}</b></span>
+            <span>perdita media <b className="text-loss">{signedUsd(b.stats.avg_loss)}</b></span>
+            <span>costo ingresso <b>{b.stats.entry_slip_pct ?? "—"}%</b> · uscita <b>{b.stats.exit_slip_pct ?? "—"}%</b></span>
+            <span>MFE <b className="text-profit">{b.stats.mfe_pct ?? "—"}%</b> · MAE <b className="text-loss">{b.stats.mae_pct ?? "—"}%</b></span>
+          </div>) : null}
         {!b.rows.length ? <p className="text-xs text-muted-foreground">nessun confronto ancora</p> : (
           <div className="max-h-96 overflow-auto">
             <Table>
@@ -48,7 +59,8 @@ function BoardTable({ title, b }: { title: string; b: Board | null }) {
                     <TableCell className="num text-right">{int(r.n)}</TableCell>
                     <TableCell className={cn("num hidden text-right sm:table-cell", tone(r.live))}>{signedUsd(r.live)}</TableCell>
                     <TableCell className={cn("num hidden text-right sm:table-cell", tone(r.shadow))}>{signedUsd(r.shadow)}</TableCell>
-                    <TableCell className={cn("num text-right font-semibold", tone(r.delta))}>{signedUsd(r.delta)}</TableCell>
+                    <TableCell className={cn("num text-right font-semibold", tone(r.delta))}>{signedUsd(r.delta)}{r.ci_lo != null && r.ci_lo > 0 ? " ✓" : ""}
+                      {r.ci_lo != null ? <div className="text-[0.6875rem] font-normal text-muted-foreground">{signedUsd(r.ci_lo, 0)} … {signedUsd(r.ci_hi, 0)}</div> : null}</TableCell>
                   </TableRow>))}
               </TableBody>
             </Table>

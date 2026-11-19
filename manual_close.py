@@ -21,7 +21,8 @@ REASON = "manual_close_deploy"
 
 def invariant(db):
     cash = db.execute("SELECT v FROM ledger WHERE k='cash'").fetchone()[0]
-    closed = db.execute("SELECT COALESCE(SUM(pnl_usd),0) FROM positions WHERE status='CLOSED'").fetchone()[0]
+    ep = (db.execute("SELECT v FROM ledger WHERE k='epoch_ts'").fetchone() or [0])[0]   # v10+: ledger restarts at each epoch
+    closed = db.execute("SELECT COALESCE(SUM(pnl_usd),0) FROM positions WHERE status='CLOSED' AND opened_ts>=?", (ep,)).fetchone()[0]
     opened = db.execute("SELECT COALESCE(SUM(size_usd),0) FROM positions WHERE status='OPEN'").fetchone()[0]
     return cash, D.CFG["start_equity"] + closed - opened
 
@@ -43,7 +44,7 @@ def main(dry=False):
         if not px or not liq:
             print(f"#{pid} {sym}: no market price, left OPEN"); continue
         exit_px, src, model_px, q = D.paper_sell_fill(mint, qty, px, liq)
-        proceeds = exit_px * qty; pnl = proceeds - size; pct = 100 * pnl / size
+        proceeds = max(0.0, exit_px * qty); pnl = max(proceeds - size, -size); pct = 100 * pnl / size
         if dry:
             print(f"DRY #{pid} {sym}: ref {px:.8g} fill {exit_px:.8g} ({src}) pnl {pnl:+.2f} ({pct:+.2f}%)"); continue
         with log.lock:

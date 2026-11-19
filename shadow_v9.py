@@ -160,9 +160,10 @@ class GhostBook:
                 last = self.db.execute("SELECT MAX(closed_ts) FROM shadow_ghosts WHERE rule=? AND mint=?", (rule, c.mint)).fetchone()[0]
             if last and now() - last < V9["entry_cooldown_h"] * 3600: continue
             size = min(self.cfg["max_pos_frac"] * equity, self.cfg["max_liq_frac"] * c.liq_usd)
-            if size < 50: continue
+            if size < self.cfg.get("min_size_usd", 50): continue
             ref = c.price_usd
             fill = ref * (1 + min(0.5, self.cfg["base_slippage"] + self.cfg["swap_fee"] + size / (c.liq_usd / 2)))   # model fill (no Jupiter quote), capped (v8.2)
+            fill *= 1 + self.cfg.get("net_fee_usd", 0) / size   # v11: network fee, like the live buy
             self._insert(rule, "entry", None, c.mint, c.symbol, c.pair_address, ref, fill, size / fill, size,
                          dict(score=score, chg_h6=h6, chg_h1=h1, chg_m5=m5, liq=c.liq_usd, mcap=c.mcap, age_h=c.age_h, fill_src="model"))
             n_entry += 1

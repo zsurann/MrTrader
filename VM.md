@@ -66,6 +66,16 @@ Scelta dell'utente dopo 203 trade `v8_loose` (PnL −1.389 $; nessuna regola omb
 
 Il saldo paper riparte da **1.000 $** al primo avvio di `v10_sel` (chiave `epoch_v10_sel` in `ledger`; solo con 0 posizioni aperte). Taglia 3% = ~30 $, minimo ordine 10 $. Le posizioni vecchie restano nel database con `ruleset='v8_loose'`.
 
+### v11_clean (2026-11-19): ripartenza da zero
+
+Su richiesta dell'utente: nuovo `RULESET` → al primo avvio con 0 posizioni il saldo paper riparte da 1.000 $ (`ledger.epoch_ts`). Nessun trade cancellato: report (`--ruleset v11_clean`) e dashboard (filtro su `cfg.epoch_ts`) contano solo dalla ripartenza.
+
+- Commissione di rete Solana 0,05 $ per swap dentro ogni fill paper (live, ombra e ghost).
+- `trough_price` sulle posizioni: minimo toccato (MAE). Il report mostra vincenti %, profit factor, media/trade, drawdown, costo medio d'ingresso/uscita, MFE/MAE e un intervallo di confidenza 90% (bootstrap) per ogni regola ombra: "solido" se anche il bordo basso è positivo.
+- Nuova regola ombra `entry_slip_15`: salta gli ingressi con fill > 1,5% sopra il mercato.
+- Feed Helius: in un crollo resta la fonte di uscita se il prezzo dalle riserve è sotto i riferimenti e uno snapshot RPC recente lo conferma.
+- Vendite: quote Jupiter sotto la fascia del 50% usata se l'impatto della route è ≤ 5% (prezzo vero dopo un crollo). Scout: solo coppie SOL/USDC/USDT.
+
 ### Nuove regole ombra v10 (solo log, 2026-11-19)
 
 Da una ricerca online: non esistono backtest seri pubblici su memecoin Solana, quindi sono ipotesi da misurare, non regole provate.

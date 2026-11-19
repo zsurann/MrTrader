@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { RealtimeClient, type RealtimeChannel } from "@supabase/realtime-js";
 import { PostgrestClient } from "@supabase/postgrest-js";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./config";
@@ -111,5 +111,12 @@ export function useDesk(): DeskState {
     return () => { cancelled = true; if (raf) cancelAnimationFrame(raf); sb.removeChannel(channel); };
   }, []);
 
-  return s;
+  // v11: the paper ledger restarts at each epoch (desk ledger 'epoch_ts', sent in desk_status.cfg); older trades stay in the database
+  const ep = Number((s.status?.cfg as { epoch_ts?: number } | null)?.epoch_ts ?? 0) * 1000;
+  return useMemo(() => {
+    if (!ep) return s;
+    const after = (t: string | null | undefined) => !t || Date.parse(t) >= ep;
+    return { ...s, positions: s.positions.filter((p) => after(p.opened_at)), trades: s.trades.filter((t) => after(t.ts)),
+      equity: s.equity.filter((e) => after(e.ts)) };
+  }, [s, ep]);
 }

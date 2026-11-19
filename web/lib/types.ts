@@ -22,8 +22,11 @@ export type SmartFactor = { ts: string; symbol: string | null; score: number | n
 export type ShadowA = { passes: number; would_block: number; undecidable: number; entries: number; entries_blocked: number; closed: number; actual_pnl_usd: number; shadow_pnl_usd: number };
 export type ShadowB = { watched: number; triggered: number; compared: number; actual_pnl_usd: number; shadow_pnl_usd: number;
   rows: { symbol: string | null; actual: number | null; shadow: number | null; triggered: boolean | null }[] };
-export type BoardRow = { kind: string; rule: string; n: number; blocked: number | null; live: number; shadow: number; delta: number };
-export type Board = { positions: number; live_pnl: number; rows: BoardRow[] };
+export type BoardRow = { kind: string; rule: string; n: number; blocked: number | null; live: number; shadow: number; delta: number;
+  ci_lo?: number | null; ci_hi?: number | null };
+export type BoardStats = { trades: number; win_rate: number; avg_win: number | null; avg_loss: number | null; profit_factor: number | null;
+  expectancy: number | null; max_drawdown: number; entry_slip_pct: number | null; exit_slip_pct: number | null; mfe_pct: number | null; mae_pct: number | null };
+export type Board = { positions: number; live_pnl: number; rows: BoardRow[]; stats?: BoardStats | null };
 export type Smart = {
   id: number; updated_at: string; list_size: number; tracked: number; tokens_done: number; tokens_skipped: number; blacklisted: number;
   payload: { top: { a: string; score: number; wins: number; losses: number; tokens: string[] }[];
