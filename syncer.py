@@ -264,7 +264,7 @@ class Syncer:
         try: h = json.load(open(os.path.join(DATA, "cycle_health.json")))   # v7: written by the desk after every cycle
         except Exception: h = {}
         return [dict(id=1, heartbeat_at=ts(time.time()), mode="PAPER", desk_pid=pid, desk_alive=alive, cycle=last[0],
-                     last_cycle_at=ts(last[1]), cash=cash, equity=eq, start_equity=10000.0, open_positions=nopen,
+                     last_cycle_at=ts(last[1]), cash=cash, equity=eq, start_equity=1000.0, open_positions=nopen,
                      cfg=(json.loads(cfg[0]).get("cfg") if cfg else None),
                      last_success_at=ts(h.get("last_success_ts") or last[1]), last_success_cycle=h.get("last_success_cycle") or last[0],
                      consecutive_cycle_errors=int(h.get("consecutive_errors") or 0),

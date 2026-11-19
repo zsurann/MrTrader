@@ -26,7 +26,8 @@ PAUSE_PATH = os.path.join(DATA, "PAUSE_ENTRIES")   # v8.1: if this file exists t
 
 CFG = dict(
     # Scout
-    min_age_h=0.5, max_age_h=168.0, min_mcap=100_000, max_mcap=20_000_000,   # v8_loose (user-approved 2026-11-18): age 72h -> 168h, mcap min 300k -> 100k
+    min_age_h=0.5, max_age_h=6.0, min_mcap=100_000,   # v10: max age 168h -> 6h (ex-shadow new_pair_6h)
+    max_mcap=20_000_000,   # v8_loose (user-approved 2026-11-18): age 72h -> 168h, mcap min 300k -> 100k
     # Filter
     min_liq=25_000, min_vol_h1=15_000, max_top10_pct=35.0, max_dev_pct=5.0,   # v8_loose: liq 100k -> 25k, vol1h 50k -> 15k, top10 25 -> 35%, dev 3 -> 5%
     max_bundle_pct=20.0, max_h1_change=150.0, min_primary_lp_locked=90.0,   # v8_loose: bundle 10 -> 20%, 1h pump cap +80 -> +150%; LP lock unchanged
@@ -36,11 +37,16 @@ CFG = dict(
     weights=dict(momentum=0.20, unique_buyers=0.15, buy_sell=0.20, holder_growth=0.15,
                  liq_mcap=0.15, smart_wallets=0.15),  # intended weights (sum 1.0); if smart data unavailable -> renormalised over the other 5
     # Executor
-    start_equity=10_000.0, max_pos_frac=0.03, max_open=15, reentry_cooldown_h=1.0,   # v8_loose: size 5% -> 3%, max open 10 -> 15, cooldown 6h -> 1h
+    start_equity=1_000.0, min_size_usd=10.0, max_pos_frac=0.03,   # v10: paper ledger restarts at 1000 $ (min order 50 -> 10 $)
+    max_open=15, reentry_cooldown_h=1.0,   # v8_loose: size 5% -> 3%, max open 10 -> 15, cooldown 6h -> 1h
     max_liq_frac=0.0025,   # v6: size also capped at 0.25% of pool liquidity (modeled impact <= 0.5% per side)
     base_slippage=0.005, swap_fee=0.0025,  # + price impact = size / (liq/2)
     # Risk
-    stop_pct=0.10, trail_activate=0.12, trail_dist=0.06, risk_poll_s=30,   # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
+    stop_pct=0.10, trail_activate=0.12, trail_dist=0.04, risk_poll_s=30,   # v10: trail 6% -> 4% (ex-shadow trail_4pct)
+    be_arm=0.08, be_lock=0.01,   # v10: once the peak passes +8% over the fill, stop >= fill +1% (ex-shadow breakeven_8)
+    min_score_old=70.0,          # v10: pre-v6 score (smart 0 counts as 0) must also be >= 70 (ex-shadow old_rules_v5 entry)
+    smart_exit_live=True,        # v10: close when a tracked smart wallet sells the coin (ex-shadow smart_exit)
+      # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
     # Loop
     scan_interval_s=180, rugcheck_cache_s=600,
     smart_cache_s=1800,   # v8.1 (Helius budget): reuse a mint's smart-wallet lookup for 30 min (was 10 min)
@@ -63,13 +69,13 @@ CFG = dict(
     helius_ws_live=True, ws_max_dev_pct=8.0, ws_silent_s=15, helius_ws_daily_credits=9000, ws_poll_post_watch_s=300,
 )
 # Shadow-only exit variants. Log only: never read by live Executor/Risk. Do not put these in CFG.
-SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # same +12% activation as the live trail, then 4% under the peak (live uses 6%)
+SHADOW_TRAIL4 = dict(activate=0.12, dist=0.04)  # trail used by the shadow combo_tp_trail4 (= live trail since v10)
 # v5 shadow-only candidates from the best-practice review (log only, never read by live code).
 SHADOW_ENTRY_V5 = dict(organic_50=50.0, churn_50=0.5, churn_max_age_h=24.0, m5_chase_10=10.0, top1_10=10.0)
-SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03), breakeven_8=dict(arm=0.08, lock_gain=0.01),
+SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03),   # v10: breakeven_8 is live now
                       old_rules_v5=dict(stop=0.06, activate=0.12, dist=0.06, base="fill"))   # v6: what the pre-v6 exit rules would have done
 OLD_RULES_V5 = dict(min_liq=40_000, max_pos_frac=0.08, stop_pct=0.06, smart_zero_counts=True, pass_score=70.0)   # pre-v6 live values, shadow reference only
-RULESET = "v8_loose"   # tag stored on every score row and position (compare rule sets / score buckets later)
+RULESET = "v10_sel"   # tag stored on every score row and position (compare rule sets / score buckets later)
 # v8: the v6/v7 LIVE entry rules, kept as a SHADOW reference (log only). Every v8 entry records whether these would have allowed it.
 STRICT_V7 = dict(pass_score=70.0, min_liq=100_000, min_vol_h1=50_000, min_mcap=300_000, max_mcap=20_000_000, max_age_h=72.0,
                  max_h1_change=80.0, max_top10_pct=25.0, max_dev_pct=3.0, max_bundle_pct=10.0)
@@ -525,6 +531,15 @@ class Logger:
             except sqlite3.OperationalError: pass   # already there
         if self.db.execute("SELECT v FROM ledger WHERE k='cash'").fetchone() is None:
             self.db.execute("INSERT INTO ledger VALUES('cash',?)", (CFG["start_equity"],))
+        # v10: the first start of a new RULESET restarts the paper ledger at start_equity (only with 0 open positions;
+        # otherwise it retries on the next start). ledger 'epoch_ts' = when the current ledger started.
+        self.reset = False
+        if self.db.execute("SELECT 1 FROM ledger WHERE k=?", ("epoch_" + RULESET,)).fetchone() is None and \
+                self.db.execute("SELECT COUNT(*) FROM positions WHERE status='OPEN'").fetchone()[0] == 0:
+            self.db.execute("UPDATE ledger SET v=? WHERE k='cash'", (CFG["start_equity"],))
+            self.db.execute("INSERT OR REPLACE INTO ledger VALUES('epoch_ts',?)", (now(),))
+            self.db.execute("INSERT OR REPLACE INTO ledger VALUES(?,?)", ("epoch_" + RULESET, now()))
+            self.reset = True
         self.cycle = (self.db.execute("SELECT MAX(cycle) FROM cycles").fetchone()[0] or 0)
 
     def event(self, stage, kind, mint=None, symbol=None, **data):
@@ -1094,7 +1109,7 @@ class Executor:
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["data unavailable: fresh price at entry"], {}); return None
             cash, eq = self.equity()
             size = min(CFG["max_pos_frac"] * eq, cash, CFG["max_liq_frac"] * liq)   # v6: also <= 0.25% of pool liquidity
-            if size < 50:
+            if size < CFG["min_size_usd"]:
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["insufficient paper cash"], dict(cash=cash)); return None
             slip, _ = model_slip(size, liq)   # v8.2: capped model (liq here is the fresh DexScreener value, size <= 0.25% of it)
             model_fill = ref * (1 + slip); fill = model_fill; fill_src = "model"
@@ -1120,7 +1135,6 @@ class Risk:
     def __init__(self, log: Logger):
         self.log = log
         self._shadow_booted = False
-        self._t4w = self._t4x = self._t4c = set()
         self._v5 = {r: dict(w=set(), x=set(), c=set()) for r in SHADOW_EXIT_V5}; self._opened = {}; self._refs = {}
         self._cw = self._cp = self._cx = self._cc = set()
         self._plocks, self._plocks_lock = {}, threading.Lock()
@@ -1164,7 +1178,6 @@ class Risk:
 
     def _shadow_boot(self):
         if self._shadow_booted: return
-        self._t4w, self._t4x, self._t4c = self._shadow_ids("trail_4pct", "WATCH"), self._shadow_ids("trail_4pct", "SHADOW_EXIT"), self._shadow_ids("trail_4pct", "COMPARE")
         self._cw, self._cp, self._cx, self._cc = (self._shadow_ids("combo_tp_trail4", "WATCH"), self._shadow_ids("combo_tp_trail4", "PARTIAL"),
                                                   self._shadow_ids("combo_tp_trail4", "SHADOW_EXIT"), self._shadow_ids("combo_tp_trail4", "COMPARE"))
         self._v5 = {r: dict(w=self._shadow_ids(r, "WATCH"), x=self._shadow_ids(r, "SHADOW_EXIT"), c=self._shadow_ids(r, "COMPARE"))
@@ -1185,19 +1198,7 @@ class Risk:
         except Exception as e: self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, rule="v5_tick", error=repr(e))
         act_lvl = (self._ref(pid) or ep) * (1 + SHADOW_TRAIL4["activate"])   # v6: same market reference as the live trail
         trail_on = peak >= act_lvl
-        shadow_stop = peak * (1 - SHADOW_TRAIL4["dist"]) if trail_on else None
-
-        if pid not in self._t4w:
-            self._sev("trail_4pct", "WATCH", mint, sym, pid, entry_price=ep, activate=SHADOW_TRAIL4["activate"],
-                      dist=SHADOW_TRAIL4["dist"], peak=peak)
-            self._t4w.add(pid)
-        if pid not in self._t4x and trail_on and px <= shadow_stop:
-            exit_px, src, model_px, q = paper_sell_fill(mint, qty, px, liq, reuse)
-            pnl = exit_px * qty - size
-            self._sev("trail_4pct", "SHADOW_EXIT", mint, sym, pid, entry_price=ep, peak=peak, shadow_stop=shadow_stop,
-                      size_usd=size, hyp_pnl_usd=round(pnl, 2), hyp_pnl_pct=round(100 * pnl / size, 2) if size else None,
-                      **self._shadow_fill_payload(px, exit_px, src, model_px, q, qty))
-            self._t4x.add(pid)
+        shadow_stop = peak * (1 - SHADOW_TRAIL4["dist"]) if trail_on else None   # v10: trail_4pct is live; combo below still uses it
 
         frac, tp_pct = SWL.PTP["frac"], SWL.PTP["tp_pct"]
         if pid not in self._cw:
@@ -1265,24 +1266,9 @@ class Risk:
                       shadow_exit_iso=(hyp or {}).get("_ts_iso"), shadow_exit_price=(hyp or {}).get("exit_price"))
             st["c"].add(pid)
     def shadow_compare_close(self, pid, mint, sym, qty, size, actual_pnl, actual_pct, reason, exit_px):
-        """Once the live paper position closes, record actual vs shadow PnL for trail_4pct and the combo variant."""
+        """Once the live paper position closes, record actual vs shadow PnL for the v5 exits and the combo variant."""
         try: self.shadow_v5_close(pid, mint, sym, actual_pnl, actual_pct, reason, exit_px)
         except Exception as e: self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, rule="v5_close", error=repr(e))
-        if pid not in self._t4c:
-            hyp = self._shadow_row("trail_4pct", "SHADOW_EXIT", pid)
-            if hyp:
-                spnl, spct = hyp.get("hyp_pnl_usd"), hyp.get("hyp_pnl_pct")
-                triggered = True
-            else:
-                spnl, spct, triggered = round(actual_pnl or 0, 2), round(actual_pct or 0, 2), False
-            self._sev("trail_4pct", "COMPARE", mint, sym, pid, triggered=triggered,
-                      actual_pnl_usd=round(actual_pnl or 0, 2), actual_pnl_pct=round(actual_pct or 0, 2),
-                      actual_reason=reason, actual_exit_price=exit_px,
-                      shadow_pnl_usd=spnl, shadow_pnl_pct=spct,
-                      shadow_exit_ts=(hyp or {}).get("_ts"), shadow_exit_iso=(hyp or {}).get("_ts_iso"),
-                      shadow_ref=(hyp or {}).get("ref_price"), shadow_exit_price=(hyp or {}).get("exit_price"),
-                      shadow_fill_src=(hyp or {}).get("fill_src"))
-            self._t4c.add(pid)
         if pid not in self._cc:
             part = self._shadow_row("combo_tp_trail4", "PARTIAL", pid)
             trail = self._shadow_row("combo_tp_trail4", "SHADOW_EXIT", pid)
@@ -1309,7 +1295,7 @@ class Risk:
             rows = self.log.db.execute(
                 "SELECT id,mint,symbol,qty,size_usd,pnl_usd,pnl_pct,exit_reason,exit_price FROM positions WHERE status='CLOSED'").fetchall()
         for pid, mint, sym, qty, size, pnl, pct, reason, xp in rows:
-            if (pid in self._t4w and pid not in self._t4c) or (pid in self._cw and pid not in self._cc) or \
+            if (pid in self._cw and pid not in self._cc) or \
                any(pid in st["w"] and pid not in st["c"] for st in self._v5.values()):
                 self.shadow_compare_close(pid, mint, sym, qty, size, pnl, pct, reason, xp)
 
@@ -1339,8 +1325,9 @@ class Risk:
                 r = self.log.db.execute("SELECT ref_price,entry_price FROM positions WHERE id=?", (pid,)).fetchone()
             self._refs[pid] = (r[0] or r[1]) if r else None
         return self._refs[pid]
-    def apply_price(self, pid, px, liq, src, trig=None):
-        """Evaluate the live rules for one OPEN position at price `px` from `src`. Returns True if it closed it."""
+    def apply_price(self, pid, px, liq, src, trig=None, force=None):
+        """Evaluate the live rules for one OPEN position at price `px` from `src`. Returns True if it closed it.
+        `force` = exit reason that closes at `px` regardless of the stop (v10: smart_exit)."""
         with self._plock(pid):
             r = self._open_row(pid)
             if not r or not px: return False
@@ -1349,9 +1336,11 @@ class Risk:
             new_trail = bool(trail) or new_peak >= (self._ref(pid) or ep) * (1 + CFG["trail_activate"])
             new_stop = stop
             if new_trail: new_stop = max(stop, new_peak * (1 - CFG["trail_dist"]))
+            be = new_peak >= ep * (1 + CFG["be_arm"])   # v10 breakeven: from the fill, like the old breakeven_8 shadow
+            if be: new_stop = max(new_stop, ep * (1 + CFG["be_lock"]))
             if new_trail and not trail:
                 self.log.event("Risk", "TRAIL_ACTIVATED", mint, sym, peak=new_peak, entry=ep, stop=new_stop, price_src=src)
-            if px <= new_stop:
+            if px <= new_stop or force:
                 # live fill first (unchanged model), then shadow can reuse it when the size matches
                 exit_px, fill_src, model_px, q = paper_sell_fill(mint, qty, px, liq, liq_fallback=self._entry_liq(pid))
                 live_reuse = dict(ref=px, qty=qty, exit_px=exit_px, src=fill_src, model_px=model_px, q=q)
@@ -1360,7 +1349,8 @@ class Risk:
                                quoted_slip_pct=(round(100 * (1 - q["price"] / px), 3) if q else None),
                                jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
                 proceeds = max(0.0, exit_px * qty); pnl = max(proceeds - size, -size)   # v8.2 hard guard: never below -100% of size
-                reason = "trailing stop" if new_trail else f"stop-loss -{100 * CFG['stop_pct']:.0f}%"
+                reason = force or ("trailing stop" if new_trail and new_stop > ep * (1 + CFG["be_lock"]) else
+                                   f"breakeven +{100 * CFG['be_lock']:.0f}%" if be else f"stop-loss -{100 * CFG['stop_pct']:.0f}%")
                 with self.log.lock:
                     db = self.log.db; db.execute("BEGIN IMMEDIATE")
                     try:   # same all-or-nothing pattern as Risk.open: a failed write must never leave the shared connection mid-transaction
@@ -1446,10 +1436,17 @@ class Risk:
             try: self._post_watch(prices)
             except Exception as e: self.log.event("Shadow", "ERROR", rule="poll_stop", error=repr(e))
             feed = getattr(self, "feed", None)
+            smart = set()
+            if CFG["smart_exit_live"]:   # v10: smartwallets.py logs the first sell by a tracked smart wallet; Risk closes on it
+                with self.log.lock:
+                    smart = {r[0] for r in self.log.db.execute(   # shadow_pos index: (position_id, kind)
+                        f"SELECT position_id FROM shadow_events WHERE position_id IN ({','.join('?' * len(rows))}) AND kind='SHADOW_EXIT' AND rule='smart_exit'",
+                        [r[0] for r in rows])} if rows else set()
             for pid, mint, sym, pair, ep, qty, size, stop, peak, trail, istop in rows:
                 if pair not in prices or not prices[pair][0]:
                     self.log.event("Risk", "PRICE_MISSING", mint, sym, pair=pair); continue
                 px, liq = prices[pair]
+                if pid in smart and self.apply_price(pid, px, liq, "dexscreener_poll", force="smart_exit"): continue
                 if feed: feed.note_ds(pid, px, liq)
                 ok, why = feed.live_ok(pid) if feed else (False, "helius feed disabled")
                 self._source(pid, mint, sym, ok, why)
@@ -1864,6 +1861,15 @@ class Desk:
             try: self.risk.poll()
             except Exception as e: self.log.event("Risk", "ERROR", error=repr(e), tb=traceback.format_exc()[-800:])
             self.stop.wait(CFG["risk_poll_s"])
+    def live_gates(self, ap):
+        """v10 (user-approved 2026-11-19): ex-shadow entry gates with the lowest loss per trade on 203 paper trades.
+        new_pair_6h is CFG max_age_h=6 in Scout. -> list of kill reasons ([] = may enter)."""
+        r = []; so = ap.components.get("_score_old")
+        if so is None or so < CFG["min_score_old"]: r.append(f"score_old {so} < {CFG['min_score_old']:.0f}")
+        c = ap.fp.cand
+        bp = SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint))["buy_pressure"]
+        if bp[1]: r.append(f"buy pressure weak {bp[0]}")
+        return r
     def shadow_entry_gate(self, ap, order):
         """Shadow rule (a), LOG ONLY: would 'buy only if >= 2 smart wallets entered' have blocked this pass/entry?"""
         try:
@@ -1896,6 +1902,7 @@ class Desk:
             gates["strict_v7"] = (score_bucket(ap.score), bool(sr), "v7 strict entry: " + ("; ".join(sr) if sr else "would also pass"))
             try: gates.update(SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint)))   # v9 shadow entry gates (log only)
             except Exception as e: self.log.event("Shadow", "ERROR", rule="v9_gates", error=repr(e)[:200])
+            for k in ("old_rules_v5", "new_pair_6h", "buy_pressure"): gates.pop(k, None)   # v10: live now, no longer shadow
             if order and self.ghosts and pid:
                 try: self.ghosts.on_live_entry(pid, order, ap)   # v9 ghost exit variants for this live entry
                 except Exception as e: self.log.event("Shadow", "ERROR", rule="ghost_v9_entry", error=repr(e)[:200])
@@ -1958,7 +1965,9 @@ class Desk:
             if not ap:
                 self._v9_entry(fp, None, None); continue
             apass += 1
-            order = self.exec.run(ap)
+            blk = self.live_gates(ap)
+            if blk: self.log.kill("Executor", ap.fp.cand.mint, ap.fp.cand.symbol, ap.fp.cand.pair_address, blk, {})
+            order = None if blk else self.exec.run(ap)
             if order: entries += 1
             else: self._v9_entry(fp, ap, order)
             self.shadow_entry_gate(ap, order)
@@ -1972,6 +1981,7 @@ class Desk:
         print(iso(), "cycle", self.log.cycle, st, flush=True)
     def main(self, once=False):
         self.log.event("Logger", "DESK_START", mode="PAPER", ruleset=RULESET, cfg=CFG, strict_v7_shadow=STRICT_V7)
+        if self.log.reset: self.log.event("Logger", "LEDGER_RESET", ruleset=RULESET, cash=CFG["start_equity"])
         if once:   # test mode: a single cycle, no risk thread
             self.cycle(); print("http", HTTP.stats, flush=True); return
         threading.Thread(target=self.risk_loop, daemon=True).start()

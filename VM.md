@@ -49,15 +49,22 @@ VM=user@host KEY=/path/to/ssh_key ./vm_status.sh
 
 In console Oracle non usare Terminate: cancellerebbe la VM. Stop e Reboot fermano il desk.
 
-## Regole live attuali (v8_loose + v8.1)
+## Regole live attuali (v10_sel, 2026-11-19)
 
-Solo paper. Le sezioni sotto sono uno storico: i valori citati lì valgono per la versione di quel momento. Oggi:
+Solo paper. Le sezioni sotto sono uno storico. Fonte di verità: `CFG` in `desk.py`. Classifica delle regole ombra: `sudo python3 /opt/memedesk/shadow_report.py [--ruleset v10_sel]`.
 
-- Ingresso: score ≥ 55, liquidità ≥ 25k $, volume 1h ≥ 15k $, mcap 100k–20M $, età 0,5–168 h, salita 1h ≤ +150%, top 10 ≤ 35%, dev ≤ 5%, bundle ≤ 20%, LP bloccata, mint/freeze revocate.
-- Taglia: 3% dell'equity, ≤ cash e ≤ 0,25% della liquidità; max 15 posizioni aperte; cooldown di rientro 1 h. File `PAUSE_ENTRIES` = nessun nuovo ingresso.
-- Uscita: stop −10% dal prezzo di mercato all'ingresso, trailing da +12% con distanza 6%; prezzo da WebSocket Helius, fallback DexScreener.
-- Budget Helius: tetto globale 24k crediti/giorno, WS 9000/giorno, cache smart 30 min.
-- Fonte di verità: `CFG` in `desk.py`.
+Scelta dell'utente dopo 203 trade `v8_loose` (PnL −1.389 $; nessuna regola ombra rendeva la strategia positiva). Applicate le uscite che miglioravano gli stessi trade e i 3 filtri d'ingresso con la perdita per trade più bassa:
+
+| regola ex-ombra | delta su v8_loose | ora live |
+| --- | --- | --- |
+| `smart_exit` | +159 $ (146 trade) | chiude quando un wallet intelligente vende (segnale da `smartwallets.py`, ogni ~2 min) |
+| `trail_4pct` | +43 $ | trailing 6% → 4% |
+| `breakeven_8` | +39 $ | dopo +8% sul fill, stop a fill +1% |
+| `new_pair_6h` | −2,9 $/trade contro −6,6 | età massima Scout 168 h → 6 h |
+| `buy_pressure` | −3,9 $/trade | buy/sell ≥ 1,2 (5 min) e ≥ 1,1 (1 h), compratori netti 1 h > 0 |
+| `old_rules_v5` | −4,0 $/trade | punteggio vecchio (smart 0 = 0) ≥ 70 |
+
+Il saldo paper riparte da **1.000 $** al primo avvio di `v10_sel` (chiave `epoch_v10_sel` in `ledger`; solo con 0 posizioni aperte). Taglia 3% = ~30 $, minimo ordine 10 $. Le posizioni vecchie restano nel database con `ruleset='v8_loose'`.
 
 ## Aggiornamento automatico da GitHub
 

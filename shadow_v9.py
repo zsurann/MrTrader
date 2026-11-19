@@ -19,7 +19,7 @@ V9 = dict(poll_s=30, horizon_h=24.0, max_entry_ghosts=40, entry_cooldown_h=1.0, 
 
 # Exit variants (parameters are fractions of the market reference price at entry, like the live rules).
 EXIT_V9 = {
-    "ghost_live_baseline": dict(stop=0.10, activate=0.12, dist=0.06),                     # live rules at ghost cadence
+    "ghost_live_baseline": dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01),   # = LIVE_EXIT (v10 live rules at ghost cadence)
     "tp2x_half_trail25":   dict(stop=0.10, tp_x=2.0, tp_frac=0.50, trail=0.25),            # take initials at 2x, rest trails 25%
     "ladder_2x4x_trail18": dict(stop=0.30, steps=((2.0, 0.50), (4.0, 0.25)), trail=0.18),  # -30% stop, 50% @2x, 25% @4x, rest 18% under high (never below entry)
     "profit_lock":         dict(stop=0.10, locks=((0.5, 0.0), (1.0, 0.5)), trail_after=3.0, trail=0.40),
@@ -28,13 +28,13 @@ EXIT_V9 = {
     "chandelier_3atr":     dict(stop=0.10, n=14, mult=3.0),
     "momentum_wide_trail": dict(stop=0.10, activate=0.12, dist=0.06, wide_dist=0.12, h1_min=30.0, m5_min=5.0),
 }
-# Shadow entry ideas (ghost uses the live exit rules: -10% stop, trail 6% from +12%).
+# Shadow entry ideas (ghost uses the live exit rules: LIVE_EXIT).
 ENTRY_V9 = {
     "dip_after_pump": dict(h6_min=50.0, h1_max=-10.0, h1_min=-35.0, m5_min=0.0),
     "score_45_55":    dict(lo=45.0, hi=55.0),
     "migration_dip":  dict(max_since_mig_h=6.0, h1_max=-20.0, m5_min=0.0),
 }
-LIVE_EXIT = dict(stop=0.10, activate=0.12, dist=0.06)
+LIVE_EXIT = EXIT_V9["ghost_live_baseline"]   # v10: trail 4%, breakeven +1% after +8% (smart_exit not modeled)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS shadow_ghosts(id INTEGER PRIMARY KEY, rule TEXT, kind TEXT, position_id INT, mint TEXT, symbol TEXT,
@@ -157,6 +157,7 @@ class GhostBook:
         def live_like(dist):
             stop = ref * (1 - P["stop"])
             if peak >= ref * (1 + P.get("activate", 0.12)): stop = max(stop, peak * (1 - dist))
+            if P.get("be_arm") and peak >= g["entry_px"] * (1 + P["be_arm"]): stop = max(stop, g["entry_px"] * (1 + P["be_lock"]))
             return px <= stop
         if kind == "entry" or rule == "ghost_live_baseline":
             if live_like(P["dist"]): out.append((rem, "live_rules_stop"))

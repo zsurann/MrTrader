@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shadow rules scoreboard (READ ONLY, paper desk). Which shadow rules would have done better than the live rules?
 
-  sudo python3 shadow_report.py [--db /opt/memedesk/desk.sqlite] [--since-v8]
+  sudo python3 shadow_report.py [--db /opt/memedesk/desk.sqlite] [--ruleset v10_sel]
 
 delta_usd > 0 means the shadow rule beats the live rules on the same trades. Manual closes are excluded.
   exit rules  : COMPARE rows (actual vs shadow PnL on the same position) and v9 ghosts vs ghost_live_baseline.
@@ -13,13 +13,13 @@ from collections import defaultdict
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--db", default=os.path.join(os.environ.get("MEMEDESK_DATA", "/opt/memedesk"), "desk.sqlite"))
-ap.add_argument("--since-v8", action="store_true", help="only positions tagged ruleset v8_loose")
+ap.add_argument("--ruleset", help="only positions tagged with this ruleset (e.g. v8_loose, v10_sel)")
 a = ap.parse_args()
 db = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True)
 q = lambda s, p=(): db.execute(s, p).fetchall()
 cols = {r[1] for r in q("PRAGMA table_info(positions)")}
 where = "status='CLOSED' AND COALESCE(exit_reason,'') NOT LIKE 'manual_close%'"
-if a.since_v8 and "ruleset" in cols: where += " AND ruleset='v8_loose'"
+if a.ruleset and "ruleset" in cols: where += f" AND ruleset='{a.ruleset}'"
 pos = {r[0]: (r[1] or 0.0) for r in q(f"SELECT id, pnl_usd FROM positions WHERE {where}")}
 print(f"posizioni chiuse considerate: {len(pos)}  PnL live totale: {sum(pos.values()):+.2f} $")
 rows = []   # (kind, rule, n, live, shadow, delta)

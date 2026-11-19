@@ -8,16 +8,16 @@ Il codice in questo repository sostituisce il vecchio progetto MrTrader. La cron
 
 Sei agenti con handoff rigidi: Scout → Filter → Analyst → Executor → Risk, più Logger.
 
-Regole live attuali: **`v8_loose`** (approvate 2026-11-18). Fonte di verità: `CFG` in `desk.py`.
+Regole live attuali: **`v10_sel`** (approvate 2026-11-19, dopo 203 trade paper con `v8_loose`). Fonte di verità: `CFG` in `desk.py`. Il saldo paper è ripartito da **1.000 $**.
 
-- **Scout**: scopre token da DexScreener, Jupiter e GeckoTerminal. Scarta età fuori da 30 minuti–168 ore e market cap fuori da 100k–20M $.
+- **Scout**: scopre token da DexScreener, Jupiter e GeckoTerminal. Scarta età fuori da 30 minuti–**6 ore** e market cap fuori da 100k–20M $.
 - **Filter**: prima i controlli di mercato (liquidità ≥ 25k $, volume 1h ≥ 15k $, salita 1h ≤ +150%), poi RugCheck e RPC. Scarta autorità di mint/freeze, LP non bloccata, top 10 holder > 35%, dev > 5%, bundle > 20%, storico rug, transfer fee e permanent delegate. Dati mancanti = scarto.
-- **Analyst**: punteggio 0–100, passa con **55+**. Momentum, compratori unici, buy/sell, crescita holder, rapporto liquidità/mcap, più un fattore opzionale sui wallet intelligenti (se i dati mancano, i pesi vengono rinormalizzati: non penalizza).
-- **Executor**: al massimo **3%** dell'equity paper per trade e al massimo lo 0,25% della liquidità del pool; partenza 10.000 $; massimo 15 posizioni aperte; cooldown di rientro 1 ora. Se esiste il file `PAUSE_ENTRIES` non apre nuove posizioni. Il fill usa una quote Jupiter sulla size esatta (solo quote, niente firma), con fallback al modello DexScreener.
-- **Risk**: stop **-10%** dal prezzo di mercato all'ingresso; trailing che si attiva a **+12%** con distanza **6%**. Prezzo di uscita in tempo reale dalle riserve del pool via WebSocket Helius, fallback al polling DexScreener ogni 30 secondi.
+- **Analyst**: punteggio 0–100, passa con **55+**. In più il punteggio "vecchio" (smart 0 conta 0) deve essere **≥ 70** e la pressione d'acquisto positiva (buy/sell ≥ 1,2 a 5 min e ≥ 1,1 a 1 h, compratori netti 1 h > 0).
+- **Executor**: **3%** dell'equity per trade (minimo 10 $), al massimo lo 0,25% della liquidità del pool; massimo 15 posizioni aperte; cooldown di rientro 1 ora. Se esiste il file `PAUSE_ENTRIES` non apre nuove posizioni. Il fill usa una quote Jupiter sulla size esatta (solo quote, niente firma), con fallback al modello DexScreener.
+- **Risk**: stop **-10%** dal prezzo di mercato all'ingresso; **breakeven**: superato +8% sul fill, lo stop sale a fill +1%; trailing da **+12%** con distanza **4%**; **smart exit**: chiude quando un wallet intelligente tracciato vende. Prezzo di uscita in tempo reale via WebSocket Helius, fallback al polling DexScreener ogni 30 secondi.
 - **Logger**: tutto finisce in SQLite (`desk.sqlite`) e in `events.jsonl`. Ogni score e posizione ha il tag `ruleset`; ogni posizione ha `entry_meta`.
 
-Regole ombra (solo log, non muovono i trade): `strict_v7` (le vecchie regole di ingresso v6/v7), `old_rules_v5`, `partial_tp`, `smart_exit`, `skeptic`, `min2_smart`, `trail_4pct`, `combo_tp_trail4`, più le v9 in `shadow_v9.py` (ghost con 8 varianti di uscita, ingressi e filtri ombra). Budget Helius: tetto globale 24k crediti/giorno, cache smart 30 min. Adottarle sul live paper richiede una conferma esplicita.
+Regole ombra (solo log, non muovono i trade): `strict_v7` (le vecchie regole di ingresso v6/v7), uscita `old_rules_v5`, `partial_tp`, `skeptic`, `min2_smart`, `combo_tp_trail4`, `time_stop_60m`, più le v9 in `shadow_v9.py` (ghost con 8 varianti di uscita, ingressi e filtri ombra). Budget Helius: tetto globale 24k crediti/giorno, cache smart 30 min. Adottarle sul live paper richiede una conferma esplicita.
 
 ## Avvio locale (paper)
 

@@ -28,7 +28,7 @@ STATUS = os.path.join(DATA, "telegram_status.json")
 LOGF = os.path.join(DATA, "telegram.log")
 ROME = ZoneInfo("Europe/Rome")
 CFG = dict(poll_s=15, min_gap_s=2.0, max_per_hour=20, pass_dedupe_h=6, no_cycle_s=300, down_s=60,
-           daily_loss_pct=-3.0, summary_every_h=3, start_equity=10000.0,
+           daily_loss_pct=-3.0, summary_every_h=3, start_equity=1000.0,   # v10 ledger restart
            http_tries=4, http_timeout=15, queue_max=200)
 TEST_MSG = "MemeDesk su VM Google: test Telegram OK"
 

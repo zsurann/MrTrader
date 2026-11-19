@@ -241,7 +241,7 @@ def build_snapshot(db_path: str = DB_PATH) -> dict:
     db = connect_ro(db_path)
     try:
         cfg = load_cfg(db)
-        start_equity = float(cfg.get("start_equity") or 10000.0)
+        start_equity = float(cfg.get("start_equity") or 1000.0)
         pass_score = float(cfg.get("pass_score") or 70.0)
 
         cycles_rows = list(db.execute("SELECT cycle, ts, ts_iso, stats FROM cycles ORDER BY cycle"))
