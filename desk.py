@@ -1927,6 +1927,11 @@ class Desk:
             for k in ("old_rules_v5", "new_pair_6h", "buy_pressure"): gates.pop(k, None)   # v10: live now, no longer shadow
             gates["fomo_score_70"] = (ap.score, ap.score < 70.0, "fomo TikTok bot: every entry shown had Analyst score >= 70")
             gates["liq_100k"] = (c.liq_usd, (c.liq_usd or 0) < 100_000, "pool liquidity >= $100k (deeper pool = smaller gap below the stop)")
+            # v12: from shadow_report --features on 210 v8+ trades (no group was significant on its own, both looked best)
+            gates["small_cap"] = (dict(mcap=c.mcap, liq=c.liq_usd), (c.mcap or 0) > 240_000 or (c.liq_usd or 0) > 44_000,
+                                  "small coins only: mcap <= $240k and liquidity <= $44k")
+            t10 = (ap.fp.checks or {}).get("top10_pct_ex_pools")
+            gates["top10_21"] = (t10, None if t10 is None else t10 < 21.0, "top-10 holders >= 21% (concentrated holders did better)")
             b, s24 = self.breadth, self.sol_h24
             gates["market_hot"] = (dict(breadth=b, sol_h24=s24), None if b is None or s24 is None else not (b >= 0.5 and s24 > 0),
                                    "market hot: >= 50% of scouted coins up over 1h and SOL up over 24h")
