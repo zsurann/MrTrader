@@ -36,6 +36,9 @@ EXIT_V9 = {
     "fomo_stop6_trail10":  dict(stop=0.06, activate=0.15, dist=0.10),
     # "Grok Bot" TikTok video (same app): cards read "stop -6%", "trail +12%", "exit if it drops 12% from top", size 8% of stack.
     "grok_stop6_trail12":  dict(stop=0.06, activate=0.12, dist=0.12),
+    # v12: limit buy 2% under the live entry's market price, valid 10 min; if filled, live exit rules from the limit price.
+    # Not filled = no trade (PnL 0), so it is compared with the live trade it would have replaced.
+    "limit_entry_2pct":    dict(lim=0.02, wait_min=10, stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01),
 }
 # Shadow entry ideas (ghost uses the live exit rules: LIVE_EXIT).
 ENTRY_V9 = {
@@ -183,7 +186,7 @@ class GhostBook:
             if peak >= ref * (1 + P.get("activate", 0.12)): stop = max(stop, peak * (1 - dist))
             if P.get("be_arm") and peak >= g["entry_px"] * (1 + P["be_arm"]): stop = max(stop, g["entry_px"] * (1 + P["be_lock"]))
             return px <= stop
-        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10", "grok_stop6_trail12"):
+        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10", "grok_stop6_trail12", "limit_entry_2pct"):
             if live_like(P["dist"]): out.append((rem, "live_rules_stop"))
         elif rule == "tp2x_half_trail25":
             if "tp" not in st["steps"] and px >= ref * P["tp_x"]:
@@ -252,6 +255,7 @@ class GhostBook:
                     self._sell(g, st, st["rem"], "no_price", st.get("last_px") or g["ref"], 0)
                     self._close(g, st, "no_price")
                 continue
+            if g["rule"] == "limit_entry_2pct" and not st.get("filled") and self._limit(g, st, px, t): continue
             st["peak"] = max(st["peak"], px); st["last_px"], st["last_ts"] = px, t
             st["samples"] = (st["samples"] + [px])[-V9["sample_keep"]:]
             acts = [] if horizon else self.decide(g["rule"], g["kind"], g, st, px, t)
@@ -265,6 +269,21 @@ class GhostBook:
             else:
                 with self.lock:
                     self.db.execute("UPDATE shadow_ghosts SET state=? WHERE id=?", (json.dumps(st), g["id"]))
+
+    def _limit(self, g, st, px, t):
+        """v12 limit_entry_2pct while pending. -> True if the ghost must skip this tick (still waiting, or closed unfilled)."""
+        P = EXIT_V9[g["rule"]]; lvl = g["ref"] * (1 - P["lim"])
+        if px <= lvl:   # filled at the limit (resting order: no slippage, network fee only); re-base the ghost there
+            fill = lvl * (1 + self.cfg.get("net_fee_usd", 0) / g["size_usd"])
+            g["ref"], g["entry_px"], g["qty"] = lvl, fill, g["size_usd"] / fill
+            st.update(filled=True, peak=lvl)
+            with self.lock:
+                self.db.execute("UPDATE shadow_ghosts SET ref=?,entry_px=?,qty=?,state=? WHERE id=?", (lvl, fill, g["qty"], json.dumps(st), g["id"]))
+            return True
+        if t - g["opened_ts"] >= P["wait_min"] * 60:
+            st["proceeds"], st["rem"] = g["size_usd"], 0.0   # never filled: money untouched
+            self._close(g, st, "limit_not_filled"); return True
+        return True
 
     def _sell(self, g, st, frac, why, px, liq):
         q = frac * g["qty"]

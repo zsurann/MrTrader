@@ -76,6 +76,12 @@ Su richiesta dell'utente: nuovo `RULESET` → al primo avvio con 0 posizioni il 
 - Feed Helius: in un crollo resta la fonte di uscita se il prezzo dalle riserve è sotto i riferimenti e uno snapshot RPC recente lo conferma.
 - Vendite: quote Jupiter sotto la fascia del 50% usata se l'impatto della route è ≤ 5% (prezzo vero dopo un crollo). Scout: solo coppie SOL/USDC/USDT.
 
+### v12 (2026-11-19): analisi per caratteristiche + 2 regole ombra
+
+- `sudo python3 /opt/memedesk/shadow_report.py --features [--ruleset X]`: PnL medio per terzo (basso/medio/alto) di ogni caratteristica d'ingresso (`entry_meta`: score, età, liquidità, mcap, variazioni 5m/1h/6h, top10, dev, bundle, organic, smart wallet, costo d'ingresso), con intervallo 90%.
+- Ghost `limit_entry_2pct`: invece di comprare a mercato, ordine limite 2% sotto il prezzo dell'ingresso live, valido 10 min; non eseguito = nessun trade (PnL 0).
+- Filtro `market_hot`: compra solo se ≥ 50% delle coin dello Scout è in salita a 1 h e SOL è in salita a 24 h (1 chiamata DexScreener in più per ciclo).
+
 ### Ombra "fomo" (solo log, 2026-11-19)
 
 Dal video TikTok di un bot "fomo" (solo schermate, nessuna regola pubblica): ingresso `fomo_score_70` (score ≥ 70) e uscita ghost `fomo_stop6_trail10` (stop −6%, trailing 10% da +15%; il trailing è una nostra ipotesi). La loro taglia, 25–40% del saldo per trade, non è copiata: cambierebbe il rischio, non l'esito percentuale del trade.

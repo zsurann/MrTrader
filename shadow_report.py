@@ -86,12 +86,45 @@ def stats(db, where, args):
                 stop_gap_pct=avg(g := [100 * (x[3] / x[7] - 1) for x in r if x[3] and x[7] and x[8] and x[8].startswith(("stop", "trailing", "breakeven"))]),
                 stop_gap_worst_pct=round(min(g), 2) if g else None)
 
+FEATURES = ("score", "score_old", "age_h", "liq_usd", "mcap", "vol_h1", "chg_m5", "chg_h1", "chg_h6", "top10", "top1",
+            "dev_pct", "bundle", "organic", "smart_count", "entry_slip_pct")
+
+def features(db, ruleset=None):
+    """v12: PnL per tertile of every entry feature (entry_meta, closed non-manual trades). A tertile whose 90% interval
+    of the MEAN PnL is above 0 is a real edge candidate; one far below the others is a filter candidate."""
+    where, args = "status='CLOSED' AND COALESCE(exit_reason,'') NOT LIKE 'manual_close%' AND entry_meta IS NOT NULL", []
+    if ruleset: where += " AND ruleset=?"; args.append(ruleset)
+    rows = []
+    for pnl, slip, meta in db.execute(f"SELECT pnl_usd, entry_slip_pct, entry_meta FROM positions WHERE {where}", args):
+        m = json.loads(meta); m["entry_slip_pct"] = slip; rows.append((pnl or 0.0, m))
+    out = []
+    for f in FEATURES:
+        v = sorted(((m[f], p) for p, m in rows if isinstance(m.get(f), (int, float))), key=lambda x: x[0])   # value only: ties keep trade order
+        if len(v) < 15 or len({x[0] for x in v}) < 3: continue   # too few trades or values to split into thirds
+        k = len(v) // 3
+        for i, part in enumerate((v[:k], v[k:2 * k], v[2 * k:])):
+            pn = [p for _, p in part]; lo, hi = ci90(pn)
+            n = len(pn)
+            out.append(dict(feature=f, group=("basso", "medio", "alto")[i], lo_val=part[0][0], hi_val=part[-1][0], n=n,
+                            mean=round(sum(pn) / n, 2), win=round(100 * sum(1 for p in pn if p > 0) / n, 1),
+                            ci_lo=None if lo is None else round(lo / n, 2), ci_hi=None if hi is None else round(hi / n, 2)))
+    return dict(trades=len(rows), rows=out)
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=os.path.join(os.environ.get("MEMEDESK_DATA", "/opt/memedesk"), "desk.sqlite"))
     ap.add_argument("--ruleset", help="only positions tagged with this ruleset (e.g. v8_loose, v10_sel)")
     ap.add_argument("--all", action="store_true", help="also list the rules that are live now (retired from shadow)")
+    ap.add_argument("--features", action="store_true", help="PnL per tertile of each entry feature instead of the shadow board")
     a = ap.parse_args()
+    if a.features:
+        fr = features(sqlite3.connect(f"file:{a.db}?mode=ro", uri=True), a.ruleset)
+        print(f"trade con caratteristiche d'ingresso: {fr['trades']}  (media $/trade per terzo; [IC 90%]; ✓ = anche il bordo basso > 0)")
+        for x in fr["rows"]:
+            ci = f"[{x['ci_lo']:+.1f}, {x['ci_hi']:+.1f}]" if x["ci_lo"] is not None else ""
+            print(f"{x['feature']:15} {x['group']:5} {x['lo_val']:>10.4g} … {x['hi_val']:<10.4g} n={x['n']:3d} media {x['mean']:+6.2f} "
+                  f"vinc {x['win']:5.1f}% {ci}{' ✓' if x['ci_lo'] is not None and x['ci_lo'] > 0 else ''}")
+        raise SystemExit
     b = board(sqlite3.connect(f"file:{a.db}?mode=ro", uri=True), a.ruleset, a.all)
     print(f"posizioni chiuse considerate: {b['positions']}  PnL live totale: {b['live_pnl']:+.2f} $")
     if b["stats"]: print("live:", "  ".join(f"{k}={v}" for k, v in b["stats"].items()))

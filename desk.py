@@ -1861,6 +1861,7 @@ class Desk:
         self.feed = HeliusFeed(self.log, self.fast) if helius_rpc_url() else None
         self.risk.feed = self.feed
         self.liq_hist = {}   # v9 shadow: mint -> [(ts, liq)] over the last 2h (Scout candidates)
+        self.breadth = self.sol_h24 = None   # v12 shadow: market regime, refreshed every cycle
         try:
             self.ghosts = SV9.GhostBook(self.log.db, self.log.lock, self.log.jsonl, lambda u: HTTP.get(u, tries=2), paper_sell_fill, CFG,
                                         self.log.event, SWL.shadow_event)
@@ -1926,6 +1927,9 @@ class Desk:
             for k in ("old_rules_v5", "new_pair_6h", "buy_pressure"): gates.pop(k, None)   # v10: live now, no longer shadow
             gates["fomo_score_70"] = (ap.score, ap.score < 70.0, "fomo TikTok bot: every entry shown had Analyst score >= 70")
             gates["liq_100k"] = (c.liq_usd, (c.liq_usd or 0) < 100_000, "pool liquidity >= $100k (deeper pool = smaller gap below the stop)")
+            b, s24 = self.breadth, self.sol_h24
+            gates["market_hot"] = (dict(breadth=b, sol_h24=s24), None if b is None or s24 is None else not (b >= 0.5 and s24 > 0),
+                                   "market hot: >= 50% of scouted coins up over 1h and SOL up over 24h")
             if order:   # v11: only decidable for real entries (the quote is taken by the Executor)
                 lim = CFG["shadow_max_entry_slip_pct"]
                 gates["entry_slip_15"] = (order.slippage_pct, order.slippage_pct > lim, f"skip if the fill is > {lim}% above the market price")
@@ -1963,6 +1967,14 @@ class Desk:
         t_sc = now()
         cands, st = self.scout.run()
         scout_s = now() - t_sc
+        try:   # v12 shadow: market regime = share of scouted coins up over 1h + SOL 24h change (1 extra DexScreener call)
+            ch = [x for x in ((c.price_change or {}).get("h1") for c in cands) if x is not None]
+            self.breadth = round(sum(1 for x in ch if x > 0) / len(ch), 3) if len(ch) >= 5 else None
+            d = HTTP.get("https://api.dexscreener.com/tokens/v1/solana/" + SOL_MINT)
+            ps = [p for p in (d if isinstance(d, list) else []) if (p.get("baseToken") or {}).get("address") == SOL_MINT]
+            best = max(ps, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0) if ps else None
+            self.sol_h24 = (best.get("priceChange") or {}).get("h24") if best else None
+        except Exception: self.breadth = self.sol_h24 = None
         try:   # v9 shadow: liquidity history for the liq_growth gate (in memory, 2h)
             tcut = now() - 7200
             for c in cands:
