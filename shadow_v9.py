@@ -144,7 +144,7 @@ class GhostBook:
             size = min(self.cfg["max_pos_frac"] * equity, self.cfg["max_liq_frac"] * c.liq_usd)
             if size < 50: continue
             ref = c.price_usd
-            fill = ref * (1 + self.cfg["base_slippage"] + self.cfg["swap_fee"] + size / (c.liq_usd / 2))   # model fill (no Jupiter quote for ghosts)
+            fill = ref * (1 + min(0.5, self.cfg["base_slippage"] + self.cfg["swap_fee"] + size / (c.liq_usd / 2)))   # model fill (no Jupiter quote), capped (v8.2)
             self._insert(rule, "entry", None, c.mint, c.symbol, c.pair_address, ref, fill, size / fill, size,
                          dict(score=score, chg_h6=h6, chg_h1=h1, chg_m5=m5, liq=c.liq_usd, mcap=c.mcap, age_h=c.age_h, fill_src="model"))
             n_entry += 1
@@ -247,13 +247,14 @@ class GhostBook:
             exit_px, src, model_px, _ = self.sell_fill(g["mint"], q, px, liq)
         else:
             exit_px, src = px * (1 - self.cfg["base_slippage"] - self.cfg["swap_fee"]), "model_no_liq"
-        st["proceeds"] += exit_px * q; st["rem"] = max(0.0, st["rem"] - frac)
+        if not exit_px or exit_px <= 0 or not math.isfinite(exit_px): exit_px, src = px * 0.5, "guard_floor"   # v8.2: never a negative fill
+        st["proceeds"] += max(0.0, exit_px * q); st["rem"] = max(0.0, st["rem"] - frac)
         if st["rem"] > 1e-9:
             self.sev(self.db, self.lock, self.jsonl, g["rule"], "PARTIAL", g["mint"], g["symbol"], g["position_id"], ghost_id=g["id"],
                      frac=round(frac, 3), reason=why, ref_price=px, exit_price=exit_px, fill_src=src, proceeds=round(exit_px * q, 2))
 
     def _close(self, g, st, reason):
-        pnl = st["proceeds"] - g["size_usd"]; pct = 100 * pnl / g["size_usd"] if g["size_usd"] else None
+        pnl = max(st["proceeds"] - g["size_usd"], -g["size_usd"]); pct = 100 * pnl / g["size_usd"] if g["size_usd"] else None
         actual = None
         if g["position_id"]:
             with self.lock:

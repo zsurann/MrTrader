@@ -672,8 +672,9 @@ class Builder:
             d = self.http.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair}") or {}
             liq = (((d.get("pairs") or [None])[0] or {}).get("liquidity") or {}).get("usd") or 0
             from desk import CFG
-            slip = CFG["base_slippage"] + CFG["swap_fee"] + (t["price"] * qty) / max(liq / 2, 1)
-            xp = t["price"] * (1 - slip); pnl = xp * qty - size
+            from desk import model_slip, sane_exit   # v8.2: capped model, fill always > 0
+            slip, _ = model_slip(t["price"] * qty, liq)
+            xp = sane_exit(t["price"] * (1 - slip), t["price"]); pnl = max(xp * qty - size, -size)
             shadow_event(self.db, self.lock, self.jsonl, "smart_exit", "SHADOW_EXIT", mint, sym, pid, wallet=t["wallet"],
                          trade_ts=t["ts"], trade_iso=iso(t["ts"]), ref_price=t["price"], exit_price=xp, entry_price=ep,
                          hyp_pnl_usd=round(pnl, 2), hyp_pnl_pct=round(100 * pnl / size, 2), smart_sellers=len({s['wallet'] for s in sells}))
