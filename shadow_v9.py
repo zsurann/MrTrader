@@ -27,6 +27,10 @@ EXIT_V9 = {
     "be20_trail15":        dict(stop=0.10, be_arm=0.20, be_lock=0.02, trail_arm=0.40, trail=0.15),
     "chandelier_3atr":     dict(stop=0.10, n=14, mult=3.0),
     "momentum_wide_trail": dict(stop=0.10, activate=0.12, dist=0.06, wide_dist=0.12, h1_min=30.0, m5_min=5.0),
+    # v10 shadow ideas from public memecoin exit guides (2026-11-19 web search; vendor heuristics, never backtested):
+    "tranche_25_50_100":   dict(stop=0.10, steps=((1.25, 0.25), (1.5, 0.25), (2.0, 0.25)), trail=0.10),  # scale out in quarters, rest trails 10%
+    "stale_3h":            dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01, minutes=180, min_gain=0.05),  # live rules + out after 3h if < +5%
+    "wide_stop50_trail20": dict(stop=0.50, activate=0.30, dist=0.20),   # memecoins dip before pumping: -50% stop, 20% trail from +30%
 }
 # Shadow entry ideas (ghost uses the live exit rules: LIVE_EXIT).
 ENTRY_V9 = {
@@ -80,6 +84,20 @@ def entry_gates(c, ap, liq_hist, mig_ts):
     since = (now() - mig_ts) / 3600 if mig_ts else None
     g["migrated_24h"] = (None if since is None else round(since, 2), since is None or since > 24,
                          "pump.fun graduate (PumpPortal migration) within the last 24h")
+    # v10 shadow gates (log only) from 2026 Solana memecoin papers / guides (see VM.md):
+    ck = ap.fp.checks or {}
+    t10 = ck.get("top10_pct_ex_pools")
+    g["top10_15"] = (t10, None if t10 is None else t10 > 15.0, "top-10 holders <= 15% (MemeTrans: concentrated early holders = high risk)")
+    v1 = vol.get("h1"); n1 = b1 + s1
+    avg = (v1 / n1) if (v1 and n1) else None
+    g["small_trades_200"] = (None if avg is None else round(avg, 1), None if avg is None else avg > 200.0,
+                             "1h volume per trade <= $200 (MemeTrans: large per-buyer volume = risky launches)")
+    to = (v1 / c.liq_usd) if (v1 is not None and c.liq_usd) else None
+    g["turnover_03_3"] = (None if to is None else round(to, 2), None if to is None else not (0.3 <= to <= 3.0),
+                          "1h volume / liquidity between 0.3 and 3 (active but not a frenzy)")
+    h1c = pc.get("h1")
+    g["dip_in_uptrend"] = (dict(h1=h1c, m5=m5), None if h1c is None or m5 is None else not (h1c >= 5.0 and m5 <= 0.0),
+                           "1h up >= +5% and 5m <= 0 (buy the pullback, not the spike)")
     return g
 
 
@@ -159,7 +177,7 @@ class GhostBook:
             if peak >= ref * (1 + P.get("activate", 0.12)): stop = max(stop, peak * (1 - dist))
             if P.get("be_arm") and peak >= g["entry_px"] * (1 + P["be_arm"]): stop = max(stop, g["entry_px"] * (1 + P["be_lock"]))
             return px <= stop
-        if kind == "entry" or rule == "ghost_live_baseline":
+        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20"):
             if live_like(P["dist"]): out.append((rem, "live_rules_stop"))
         elif rule == "tp2x_half_trail25":
             if "tp" not in st["steps"] and px >= ref * P["tp_x"]:
@@ -167,24 +185,24 @@ class GhostBook:
             if "tp" in st["steps"]:
                 if px <= peak * (1 - P["trail"]) and rem > 1e-9: out.append((rem, "trail_25"))
             elif px <= ref * (1 - P["stop"]): out.append((rem, "stop_10"))
-        elif rule == "ladder_2x4x_trail18":
+        elif rule in ("ladder_2x4x_trail18", "tranche_25_50_100"):
             for i, (x, f) in enumerate(P["steps"]):
                 k = f"s{i}"
                 if k not in st["steps"] and px >= ref * x:
                     out.append((f, f"tp_{x:g}x")); st["steps"].append(k); rem -= f
             if st["steps"]:
-                if px <= max(ref, peak * (1 - P["trail"])) and rem > 1e-9: out.append((rem, "trail_18"))
-            elif px <= ref * (1 - P["stop"]): out.append((rem, "stop_30"))
+                if px <= max(ref, peak * (1 - P["trail"])) and rem > 1e-9: out.append((rem, f"trail_{100 * P['trail']:.0f}"))
+            elif px <= ref * (1 - P["stop"]): out.append((rem, f"stop_{100 * P['stop']:.0f}"))
         elif rule == "profit_lock":
             pk = peak / ref - 1; lvl = ref * (1 - P["stop"])
             if pk >= P["trail_after"]: lvl = max(lvl, peak * (1 - P["trail"]))
             elif pk >= P["locks"][1][0]: lvl = max(lvl, ref * (1 + P["locks"][1][1]))
             elif pk >= P["locks"][0][0]: lvl = max(lvl, ref * (1 + P["locks"][0][1]))
             if px <= lvl: out.append((rem, "profit_lock"))
-        elif rule == "time_stop_15m":
+        elif rule in ("time_stop_15m", "stale_3h"):
             if not st["checked"] and t - g["opened_ts"] >= P["minutes"] * 60:
                 st["checked"] = True
-                if px < ref * (1 + P["min_gain"]): out.append((rem, "time_15m"))
+                if px < ref * (1 + P["min_gain"]): out.append((rem, f"time_{P['minutes']}m"))
             if not out and live_like(P["dist"]): out.append((rem, "live_rules_stop"))
         elif rule == "be20_trail15":
             stop = ref * (1 - P["stop"])

@@ -66,6 +66,13 @@ Scelta dell'utente dopo 203 trade `v8_loose` (PnL −1.389 $; nessuna regola omb
 
 Il saldo paper riparte da **1.000 $** al primo avvio di `v10_sel` (chiave `epoch_v10_sel` in `ledger`; solo con 0 posizioni aperte). Taglia 3% = ~30 $, minimo ordine 10 $. Le posizioni vecchie restano nel database con `ruleset='v8_loose'`.
 
+### Nuove regole ombra v10 (solo log, 2026-11-19)
+
+Da una ricerca online: non esistono backtest seri pubblici su memecoin Solana, quindi sono ipotesi da misurare, non regole provate.
+
+- Filtri d'ingresso (`shadow_events`, `ENTRY_GATE`): `top10_15` (top 10 ≤ 15%: i lanci ad alto rischio hanno detentori iniziali più concentrati, MemeTrans arXiv 2602.13480), `small_trades_200` (volume 1 h per trade ≤ 200 $: volume medio per compratore alto = lancio a rischio, stesso studio), `turnover_03_3` (volume 1 h / liquidità tra 0,3 e 3), `dip_in_uptrend` (1 h ≥ +5% e 5 min ≤ 0: comprare il ritracciamento).
+- Uscite (ghost v9, confronto con `ghost_live_baseline` che ora replica le regole v10): `tranche_25_50_100` (vende un quarto a +25%, +50%, +100%, il resto con trailing 10%), `stale_3h` (regole live + uscita dopo 3 h se sotto +5%), `wide_stop50_trail20` (stop −50%, trailing 20% da +30%).
+
 ## Aggiornamento automatico da GitHub
 
 `memedesk-autoupdate.timer` ogni 10 minuti scarica il branch `claude/brave-turing-8snpk9`. Se c'è un commit nuovo e **0 posizioni paper aperte**: backup in `/opt/memedesk/pre_autoupdate/`, copia dei file della radice del repo in `/opt/memedesk`, `memedesk-safe-restart`, attesa di un ciclo riuscito (max 8 min). Se il ciclo non arriva: rollback automatico, il commit viene saltato (`.bad_rev`), avviso Telegram. Con posizioni aperte rimanda al giro dopo. Le unità systemd in `deploy/` non si aggiornano da sole (solo `run.sh` e i `.py` della radice).
