@@ -236,7 +236,7 @@ export const Agents = memo(function Agents({ cycles, scores, positions, kills, e
       <AgentCard a={AGENTS.Executor} ring={eqNow ? exposure / eqNow : 0} pop={pop}
         status={p0 ? <><b className="truncate text-[#111827]">${p0.symbol}</b><span className="num text-xs text-[#6B7280]">{money(p0.size_usd ?? 0, 0)}</span>
           <Pill tone={toneOf(p0pct)}>{p0pct == null ? "—" : sPct(p0pct)}</Pill>{open.length > 1 ? <span className="text-xs text-[#6B7280]">+{open.length - 1}</span> : null}</>
-          : <><Pill>idle</Pill><span className="truncate text-xs text-[#6B7280]">attende score ≥ 70</span></>}
+          : <><Pill>idle</Pill><span className="truncate text-xs text-[#6B7280]">attende un segnale</span></>}
         spark={equity.slice(0, 200).reverse().map((e) => e.equity)} left={`${positions.length} ingressi totali`} right={`esposizione ${money(exposure, 0)}`} />
       <AgentCard a={AGENTS.Risk} pop={pop}
         status={open.length ? <><Pill tone="info">{open.length} stop attivi</Pill>{trailing ? <Pill tone="up">{trailing} trailing</Pill> : null}</>

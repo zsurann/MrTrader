@@ -54,7 +54,7 @@ function BoardTable({ title, b }: { title: string; b: Board | null }) {
               <TableBody>
                 {b.rows.map((r) => (
                   <TableRow key={r.kind + r.rule}>
-                    <TableCell className="font-medium">{r.rule}{r.blocked != null ? <span className="text-muted-foreground"> · blocca {int(r.blocked)}</span> : null}</TableCell>
+                    <TableCell className="whitespace-normal break-all font-medium">{r.rule}{r.blocked != null ? <span className="text-muted-foreground"> · blocca {int(r.blocked)}</span> : null}</TableCell>
                     <TableCell className="hidden text-muted-foreground sm:table-cell">{KIND[r.kind] ?? r.kind}</TableCell>
                     <TableCell className="num text-right">{int(r.n)}</TableCell>
                     <TableCell className={cn("num hidden text-right sm:table-cell", tone(r.live))}>{signedUsd(r.live)}</TableCell>

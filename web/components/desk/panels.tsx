@@ -263,7 +263,7 @@ export const OpenPositions = memo(function OpenPositions({ positions, className 
   const open = useMemo(() => positions.filter((p) => p.status === "OPEN"), [positions]);
   return (
     <Panel className={className} title="Posizioni aperte" action={<Badge variant="secondary" className="num">{open.length}</Badge>} contentClassName="min-h-24">
-      {open.length === 0 ? <Empty className="min-h-24">Nessuna posizione aperta · il desk entra solo con score ≥ 70</Empty> : (
+      {open.length === 0 ? <Empty className="min-h-24">Nessuna posizione aperta · il desk entra con score ≥ 55, score vecchio ≥ 70 e pressione d'acquisto</Empty> : (
         <>
           {/* mobile: cards */}
           <ul className="flex flex-col gap-2 md:hidden">
