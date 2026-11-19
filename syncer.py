@@ -257,7 +257,8 @@ class Syncer:
         except Exception:
             rule_v5 = None
         # Jupiter quoted vs modeled slippage (paper fills)
-        fq = [json.loads(d) | dict(symbol=sy) for sy, d in q("SELECT symbol,data FROM events WHERE kind='FILL_QUOTE' ORDER BY id DESC LIMIT 10")]
+        ep = (q("SELECT v FROM ledger WHERE k='epoch_ts'") or [[0]])[0][0]   # v11: only fills since the last ledger restart
+        fq = [json.loads(d) | dict(symbol=sy) for sy, d in q("SELECT symbol,data FROM events WHERE kind='FILL_QUOTE' AND ts>=? ORDER BY id DESC LIMIT 10", (ep,))]
         fills = [dict(symbol=f["symbol"], side=f.get("side"), modeled=f.get("modeled_slip_pct"), quoted=f.get("quoted_slip_pct"),
                       used=f.get("used")) for f in fq]
         try: hel = (q("SELECT calls FROM helius_usage WHERE day=?", (time.strftime("%Y-%m-%d"),)) or [[0]])[0][0]
