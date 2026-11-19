@@ -45,6 +45,7 @@ CFG = dict(
     stop_pct=0.10, trail_activate=0.12, trail_dist=0.04, risk_poll_s=30,   # v10: trail 6% -> 4% (ex-shadow trail_4pct)
     be_arm=0.08, be_lock=0.01,   # v10: once the peak passes +8% over the fill, stop >= fill +1% (ex-shadow breakeven_8)
     min_score_old=70.0,          # v10: pre-v6 score (smart 0 counts as 0) must also be >= 70 (ex-shadow old_rules_v5 entry)
+    crash_quote_max_impact_pct=5.0,   # v10.1: sells take a Jupiter quote below the 50% band when its route impact is <= this
     smart_exit_live=True,        # v10: close when a tracked smart wallet sells the coin (ex-shadow smart_exit)
       # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
     # Loop
@@ -467,6 +468,11 @@ def paper_sell_fill(mint, qty, ref, liq, reuse=None, liq_fallback=None):
     q = JUP.sell_price(mint, qty)
     if q and ref and 0.5 <= q["price"] / ref <= 1.15:   # v8.2: band 1.05 -> 1.15 (fresh Jupiter quote vs a slightly stale ref); still capped at ref
         exit_px, src = min(q["price"], ref * (1 - 0.0005)), "jupiter"
+    elif q and ref and 0 < q["price"] < ref * 0.5 and math.isfinite(q["price"]) and \
+            q.get("impact_pct") is not None and q["impact_pct"] <= CFG["crash_quote_max_impact_pct"]:
+        # v10.1: a low-impact Jupiter route far below the ref means the ref is stale after a crash/rug (DCTC #218:
+        # DexScreener -35%, Jupiter -63% at 0.5% impact). Take the worse, real price instead of the model.
+        return q["price"], "jupiter_crash", model_px, q
     return sane_exit(exit_px, ref), src, model_px, q
 
 
