@@ -436,17 +436,32 @@ class Jup:
         except Exception: return None
 JUP = Jup()
 
-def paper_sell_fill(mint, qty, ref, liq, reuse=None):
+MIN_MODEL_LIQ = 1_000.0    # v8.2: below this the liquidity reading is treated as unknown (Helius feed before the first DexScreener poll)
+MAX_MODEL_SLIP = 0.50      # v8.2: modeled exit slippage + impact is capped at 50% (the old formula could exceed 100% -> negative fills)
+def model_slip(notional, liq):
+    """Paper slippage model (base + fee + impact = notional / (liq/2)), capped. -> (slip, liq_known)."""
+    known = bool(liq) and liq >= MIN_MODEL_LIQ
+    imp = notional / (liq / 2) if known else MAX_MODEL_SLIP
+    return min(MAX_MODEL_SLIP, CFG["base_slippage"] + CFG["swap_fee"] + imp), known
+def sane_exit(exit_px, ref):
+    """v8.2 fill guard: an exit fill is always > 0 and within [ref x (1 - MAX_MODEL_SLIP), ref]."""
+    if not ref or ref <= 0: return max(0.0, exit_px or 0.0)
+    lo, hi = ref * (1 - MAX_MODEL_SLIP), ref * (1 - 0.0005)
+    if exit_px is None or not math.isfinite(exit_px) or exit_px <= 0: return lo
+    return min(max(exit_px, lo), hi)
+def paper_sell_fill(mint, qty, ref, liq, reuse=None, liq_fallback=None):
     """Same paper exit fill as a live Risk sell: Jupiter quote with the live sanity band, else the model.
-    `reuse` lets a shadow exit at the same ref+qty reuse a fill already quoted for the live close (saves a 1 RPS slot)."""
+    `reuse` lets a shadow exit at the same ref+qty reuse a fill already quoted for the live close (saves a 1 RPS slot).
+    v8.2: unknown/tiny liquidity uses `liq_fallback` (entry liquidity), the model is capped and the result is clamped > 0."""
     if reuse and reuse.get("ref") == ref and reuse.get("qty") == qty and reuse.get("exit_px") is not None:
         return reuse["exit_px"], reuse["src"], reuse["model_px"], reuse.get("q")
-    slip = CFG["base_slippage"] + CFG["swap_fee"] + (ref * qty) / max(liq / 2, 1)
-    model_px = ref * (1 - slip); exit_px = model_px; src = "model"
+    if (not liq or liq < MIN_MODEL_LIQ) and liq_fallback and liq_fallback >= MIN_MODEL_LIQ: liq = liq_fallback
+    slip, _ = model_slip(ref * qty, liq)
+    model_px = sane_exit(ref * (1 - slip), ref); exit_px = model_px; src = "model"
     q = JUP.sell_price(mint, qty)
-    if q and ref and 0.5 <= q["price"] / ref <= 1.05:
+    if q and ref and 0.5 <= q["price"] / ref <= 1.15:   # v8.2: band 1.05 -> 1.15 (fresh Jupiter quote vs a slightly stale ref); still capped at ref
         exit_px, src = min(q["price"], ref * (1 - 0.0005)), "jupiter"
-    return exit_px, src, model_px, q
+    return sane_exit(exit_px, ref), src, model_px, q
 
 
 # ---------------------------------------------------------------- Typed handoff records
@@ -1081,7 +1096,7 @@ class Executor:
             size = min(CFG["max_pos_frac"] * eq, cash, CFG["max_liq_frac"] * liq)   # v6: also <= 0.25% of pool liquidity
             if size < 50:
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["insufficient paper cash"], dict(cash=cash)); return None
-            slip = CFG["base_slippage"] + CFG["swap_fee"] + size / (liq / 2)
+            slip, _ = model_slip(size, liq)   # v8.2: capped model (liq here is the fresh DexScreener value, size <= 0.25% of it)
             model_fill = ref * (1 + slip); fill = model_fill; fill_src = "model"
             q = JUP.buy_price(c.mint, size)   # real Jupiter quote for the exact size (quote only, nothing signed)
             if q and 0.9 <= q["price"] / ref <= 1.15:   # sanity band vs fresh DexScreener price; else keep model
@@ -1091,6 +1106,8 @@ class Executor:
                            modeled_slip_pct=round(100 * (model_fill / ref - 1), 3),
                            quoted_slip_pct=(round(100 * (q["price"] / ref - 1), 3) if q else None),
                            jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
+            if not (fill > 0 and math.isfinite(fill)) or fill > ref * (1 + MAX_MODEL_SLIP):   # v8.2 entry fill guard
+                self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["insane entry fill (guard)"], dict(ref=ref, fill=fill)); return None
             order = PaperOrder(mint=c.mint, symbol=c.symbol, pair_address=c.pair_address, ref_price=ref, fill_price=fill,
                                size_usd=round(size, 2), qty=size / fill, slippage_pct=round(slip * 100, 3),
                                stop_price=ref * (1 - CFG["stop_pct"]), score=ap.score, equity_at_entry=round(eq, 2), created_at=now(),
@@ -1108,7 +1125,7 @@ class Risk:
         self._cw = self._cp = self._cx = self._cc = set()
         self._plocks, self._plocks_lock = {}, threading.Lock()
         self._last_write, self._src_state, self._pollb, self._post, self._ws_seen = {}, {}, {}, {}, {}
-        self.feed = None
+        self.feed = None; self._eliq = {}
 
     def open(self, o: PaperOrder):
         assert isinstance(o, PaperOrder) and o.stop_price < o.fill_price
@@ -1163,6 +1180,7 @@ class Risk:
     def shadow_open_tick(self, pid, mint, sym, ep, qty, size, px, liq, peak, reuse=None):
         """Track shadow stops for one open position on every Risk poll. Writes WATCH / PARTIAL / SHADOW_EXIT only."""
         if not ep or not qty or not px: return
+        if not liq or liq < MIN_MODEL_LIQ: liq = self._entry_liq(pid) or liq   # v8.2: same liquidity fallback as the live close
         try: self.shadow_v5_tick(pid, mint, sym, ep, qty, size, px, liq, peak, reuse)
         except Exception as e: self.log.event("Shadow", "ERROR", mint=mint, symbol=sym, rule="v5_tick", error=repr(e))
         act_lvl = (self._ref(pid) or ep) * (1 + SHADOW_TRAIL4["activate"])   # v6: same market reference as the live trail
@@ -1298,6 +1316,16 @@ class Risk:
     # ---- v4: live exit evaluation shared by the 30 s DexScreener poll and the Helius real-time feed.
     # v6 levels: stop -10% from the market price at entry, trail activates at +12% over it, 6% under the peak. Only the price
     # source / timing differs: Helius pool reserves when the feed is healthy, else the DexScreener poll.
+    def _entry_liq(self, pid):
+        """v8.2: pool liquidity recorded at entry (fallback when the live feed has no liquidity reading yet)."""
+        if pid not in self._eliq:
+            try:
+                with self.log.lock:
+                    r = self.log.db.execute("SELECT entry_meta FROM positions WHERE id=?", (pid,)).fetchone()
+                m = json.loads(r[0]) if r and r[0] else {}
+                self._eliq[pid] = float(m.get("liq_usd") or m.get("scout_liq_usd") or 0) or None
+            except Exception: self._eliq[pid] = None
+        return self._eliq[pid]
     def _plock(self, pid):
         with self._plocks_lock: return self._plocks.setdefault(pid, threading.Lock())
     def _open_row(self, pid):
@@ -1325,13 +1353,13 @@ class Risk:
                 self.log.event("Risk", "TRAIL_ACTIVATED", mint, sym, peak=new_peak, entry=ep, stop=new_stop, price_src=src)
             if px <= new_stop:
                 # live fill first (unchanged model), then shadow can reuse it when the size matches
-                exit_px, fill_src, model_px, q = paper_sell_fill(mint, qty, px, liq)
+                exit_px, fill_src, model_px, q = paper_sell_fill(mint, qty, px, liq, liq_fallback=self._entry_liq(pid))
                 live_reuse = dict(ref=px, qty=qty, exit_px=exit_px, src=fill_src, model_px=model_px, q=q)
                 self.log.event("Risk", "FILL_QUOTE", mint, sym, side="sell", qty=qty, ref_price=px,
                                modeled_slip_pct=round(100 * (1 - model_px / px), 3),
                                quoted_slip_pct=(round(100 * (1 - q["price"] / px), 3) if q else None),
                                jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
-                proceeds = exit_px * qty; pnl = proceeds - size
+                proceeds = max(0.0, exit_px * qty); pnl = max(proceeds - size, -size)   # v8.2 hard guard: never below -100% of size
                 reason = "trailing stop" if new_trail else f"stop-loss -{100 * CFG['stop_pct']:.0f}%"
                 with self.log.lock:
                     db = self.log.db; db.execute("BEGIN IMMEDIATE")
