@@ -741,6 +741,9 @@ class Scout:
                     if p.get("chainId") != "solana": continue
                     m = p["baseToken"]["address"]
                     if m not in src: continue
+                    # v10.1: only SOL/USDC/USDT pairs. A pair quoted in another memecoin (DCTC #218) has a USD price that
+                    # moves with that token too, and the Helius real-time exit cannot follow it (falls back to the 30 s poll).
+                    if (p.get("quoteToken") or {}).get("address") not in HeliusFeed.QUOTES: continue
                     liq = (p.get("liquidity") or {}).get("usd") or 0
                     if m not in best or liq > ((best[m].get("liquidity") or {}).get("usd") or 0): best[m] = p
         out, scout_kills, kill_rows = [], 0, list(cached_rows)
