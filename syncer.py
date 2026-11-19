@@ -123,6 +123,19 @@ class Syncer:
         opn = self.db.execute("SELECT qty,last_price,entry_price FROM positions WHERE status='OPEN'").fetchall()
         return cash, cash + sum(q * (lp or ep) for q, lp, ep in opn), len(opn)
 
+    def board(self):
+        """v10: shadow rules scoreboard (shadow_report.board) for the current ruleset and for all history; every 5 min."""
+        if time.time() - getattr(self, "_board_ts", 0) >= 300:
+            try:
+                import shadow_report
+                ep = self.db.execute("SELECT k FROM ledger WHERE k LIKE 'epoch_%' AND k != 'epoch_ts' ORDER BY v DESC LIMIT 1").fetchone()
+                rs = ep[0][len("epoch_"):] if ep else None
+                self._board = dict(ruleset=rs, current=shadow_report.board(self.db, rs) if rs else None, all=shadow_report.board(self.db))
+            except Exception as e:
+                self._board = dict(error=repr(e)[:200])
+            self._board_ts = time.time()
+        return self._board
+
     def smart(self):
         """One-row summary of the smart-wallet list + shadow rules (1 upsert / 30s at most, only when it changed)."""
         q = lambda sql, a=(): self.db.execute(sql, a).fetchall()
@@ -249,7 +262,7 @@ class Syncer:
                       used=f.get("used")) for f in fq]
         try: hel = (q("SELECT calls FROM helius_usage WHERE day=?", (time.strftime("%Y-%m-%d"),)) or [[0]])[0][0]
         except sqlite3.OperationalError: hel = 0
-        payload = dict(top=top, winners=winners, factors=factors, rule_a=rule_a, rule_b=rule_b, rule_skeptic=rule_s,
+        payload = dict(board=self.board(), top=top, winners=winners, factors=factors, rule_a=rule_a, rule_b=rule_b, rule_skeptic=rule_s,
                        rule_ptp=rule_p, rule_trail4=rule_t4, rule_combo=rule_c, rule_ws=rule_ws, rule_v5=rule_v5, fills=fills, helius_calls_today=hel, min_list_for_factor=10)
         return dict(id=1, updated_at=ts(time.time()), list_size=size, tracked=tracked, tokens_done=tok.get("done", 0),
                     tokens_skipped=tok.get("too_busy", 0) + tok.get("too_busy_deep", 0) + tok.get("error", 0), blacklisted=bl, payload=payload)

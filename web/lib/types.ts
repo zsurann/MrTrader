@@ -22,6 +22,8 @@ export type SmartFactor = { ts: string; symbol: string | null; score: number | n
 export type ShadowA = { passes: number; would_block: number; undecidable: number; entries: number; entries_blocked: number; closed: number; actual_pnl_usd: number; shadow_pnl_usd: number };
 export type ShadowB = { watched: number; triggered: number; compared: number; actual_pnl_usd: number; shadow_pnl_usd: number;
   rows: { symbol: string | null; actual: number | null; shadow: number | null; triggered: boolean | null }[] };
+export type BoardRow = { kind: string; rule: string; n: number; blocked: number | null; live: number; shadow: number; delta: number };
+export type Board = { positions: number; live_pnl: number; rows: BoardRow[] };
 export type Smart = {
   id: number; updated_at: string; list_size: number; tracked: number; tokens_done: number; tokens_skipped: number; blacklisted: number;
   payload: { top: { a: string; score: number; wins: number; losses: number; tokens: string[] }[];
@@ -32,5 +34,6 @@ export type Smart = {
     rule_trail4?: ShadowB;
     rule_combo?: { watched?: number; triggered?: number; compared: number; tp_hit?: number; trail_hit?: number; actual_pnl_usd: number; shadow_pnl_usd: number; rows: ShadowB["rows"] };
     fills?: { symbol: string | null; side: string | null; modeled: number | null; quoted: number | null; used: string | null }[];
-    helius_calls_today?: number } | null;
+    helius_calls_today?: number;
+    board?: { ruleset: string | null; current: Board | null; all: Board | null; error?: string } } | null;
 };
