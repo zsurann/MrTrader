@@ -31,6 +31,9 @@ EXIT_V9 = {
     "tranche_25_50_100":   dict(stop=0.10, steps=((1.25, 0.25), (1.5, 0.25), (2.0, 0.25)), trail=0.10),  # scale out in quarters, rest trails 10%
     "stale_3h":            dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01, minutes=180, min_gain=0.05),  # live rules + out after 3h if < +5%
     "wide_stop50_trail20": dict(stop=0.50, activate=0.30, dist=0.20),   # memecoins dip before pumping: -50% stop, 20% trail from +30%
+    # "fomo" TikTok bot (2026-11-19 video, screenshots only): Risk card shows stop -6%; take-profits seen +8%..+171%.
+    # shortcut: the trail (10% from +15%) is our guess of their take-profit logic, refine if their rules ever become public.
+    "fomo_stop6_trail10":  dict(stop=0.06, activate=0.15, dist=0.10),
 }
 # Shadow entry ideas (ghost uses the live exit rules: LIVE_EXIT).
 ENTRY_V9 = {
@@ -178,7 +181,7 @@ class GhostBook:
             if peak >= ref * (1 + P.get("activate", 0.12)): stop = max(stop, peak * (1 - dist))
             if P.get("be_arm") and peak >= g["entry_px"] * (1 + P["be_arm"]): stop = max(stop, g["entry_px"] * (1 + P["be_lock"]))
             return px <= stop
-        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20"):
+        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10"):
             if live_like(P["dist"]): out.append((rem, "live_rules_stop"))
         elif rule == "tp2x_half_trail25":
             if "tp" not in st["steps"] and px >= ref * P["tp_x"]:
