@@ -14,7 +14,8 @@ from collections import defaultdict
 
 # v10: these used to be shadow rules and are live now (their old rows are history, not candidates)
 RETIRED = {("uscita", "smart_exit"), ("uscita", "trail_4pct"), ("uscita", "breakeven_8"),
-           ("ingresso", "old_rules_v5"), ("ingresso", "new_pair_6h"), ("ingresso", "buy_pressure")}
+           ("ingresso", "old_rules_v5"), ("ingresso", "new_pair_6h"), ("ingresso", "buy_pressure"),
+           ("ingresso", "organic_50"), ("ingresso", "sell_spike_avoid"), ("ingresso", "liq_growth")}   # v13
 
 def board(db, ruleset=None, include_retired=False):
     """-> dict(positions, live_pnl, rows=[dict(kind, rule, n, blocked, live, shadow, delta)]) sorted by delta desc."""

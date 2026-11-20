@@ -76,6 +76,10 @@ Su richiesta dell'utente: nuovo `RULESET` → al primo avvio con 0 posizioni il 
 - Feed Helius: in un crollo resta la fonte di uscita se il prezzo dalle riserve è sotto i riferimenti e uno snapshot RPC recente lo conferma.
 - Vendite: quote Jupiter sotto la fascia del 50% usata se l'impatto della route è ≤ 5% (prezzo vero dopo un crollo). Scout: solo coppie SOL/USDC/USDT.
 
+### v13 (2026-11-20): 3 filtri ombra diventano live
+
+Approvati dall'utente. Criterio: i trade che il filtro bloccava perdevano più della media (−6,65 $/trade su 230): `organic_50` (blocca 67, −9,3 $ in media), `sell_spike_avoid` (46, −9,4 $), `liq_growth` (57, −7,8 $), tutti con intervallo 90% positivo. Saldo non azzerato: `RULESET` resta `v11_clean`, le nuove posizioni hanno `entry_meta.live_rules = "v13"`. Scartati `strict_v7`/`skeptic` (bloccano tutto) e `min2_smart`/`vol_spike_2x` (bloccano trade meno cattivi della media).
+
 ### v12 (2026-11-19): analisi per caratteristiche + 2 regole ombra
 
 - `sudo python3 /opt/memedesk/shadow_report.py --features [--ruleset X]`: PnL medio per terzo (basso/medio/alto) di ogni caratteristica d'ingresso (`entry_meta`: score, età, liquidità, mcap, variazioni 5m/1h/6h, top10, dev, bundle, organic, smart wallet, costo d'ingresso), con intervallo 90%.

@@ -20,7 +20,8 @@ function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: 
 }
 
 // v10: rules promoted from shadow to live (desk.py CFG); the board below lists only rules still in shadow
-const LIVE = ["smart exit", "trailing 4%", "breakeven +8%→+1%", "età ≤ 6 h", "pressione d'acquisto", "score vecchio ≥ 70"];
+const LIVE = ["smart exit", "trailing 4%", "breakeven +8%→+1%", "età ≤ 6 h", "pressione d'acquisto", "score vecchio ≥ 70",
+  "volume organico ≥ 50", "no picco di vendite", "liquidità non in calo"];
 const KIND: Record<string, string> = { uscita: "uscita", ingresso: "filtro", "ghost-usc": "uscita (ghost)", "ombra-ingr": "ingresso extra" };
 
 function BoardTable({ title, b }: { title: string; b: Board | null }) {

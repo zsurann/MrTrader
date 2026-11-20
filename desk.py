@@ -1090,7 +1090,7 @@ class Executor:
     def _entry_meta(self, ap, liq, ref):
         try:
             c = ap.fp.cand; ck = ap.fp.checks or {}; sr = strict_v7_reasons(c, ck, ap.score)
-            return dict(ruleset=RULESET, score=ap.score, score_bucket=score_bucket(ap.score), score_old=ap.components.get("_score_old"),
+            return dict(ruleset=RULESET, live_rules="v13", score=ap.score, score_bucket=score_bucket(ap.score), score_old=ap.components.get("_score_old"),
                         components={k: v for k, v in ap.components.items() if not k.startswith("_")},
                         smart_count=((ap.components.get("_inputs") or {}).get("smart_wallets") or {}).get("count") if isinstance((ap.components.get("_inputs") or {}).get("smart_wallets"), dict) else None,
                         liq_usd=liq, scout_liq_usd=c.liq_usd, mcap=c.mcap, age_h=c.age_h, vol_h1=(c.vol or {}).get("h1"), vol_h24=(c.vol or {}).get("h24"),
@@ -1889,8 +1889,13 @@ class Desk:
         r = []; so = ap.components.get("_score_old")
         if so is None or so < CFG["min_score_old"]: r.append(f"score_old {so} < {CFG['min_score_old']:.0f}")
         c = ap.fp.cand
-        bp = SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint))["buy_pressure"]
-        if bp[1]: r.append(f"buy pressure weak {bp[0]}")
+        g = SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint))
+        if g["buy_pressure"][1]: r.append(f"buy pressure weak {g['buy_pressure'][0]}")
+        # v13 (user-approved 2026-11-20): ex-shadow gates whose blocked trades lost more than the average trade (230 paper trades)
+        if g["sell_spike_avoid"][1]: r.append(f"sell spike {g['sell_spike_avoid'][0]}")
+        if g["liq_growth"][1]: r.append(f"liquidity falling {g['liq_growth'][0]}%")
+        org = (ap.components.get("_inputs") or {}).get("jupiter_organic_score")
+        if org is not None and org < SHADOW_ENTRY_V5["organic_50"]: r.append(f"organic score {org} < {SHADOW_ENTRY_V5['organic_50']:.0f}")
         return r
     def shadow_entry_gate(self, ap, order):
         """Shadow rule (a), LOG ONLY: would 'buy only if >= 2 smart wallets entered' have blocked this pass/entry?"""
@@ -1924,7 +1929,8 @@ class Desk:
             gates["strict_v7"] = (score_bucket(ap.score), bool(sr), "v7 strict entry: " + ("; ".join(sr) if sr else "would also pass"))
             try: gates.update(SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint)))   # v9 shadow entry gates (log only)
             except Exception as e: self.log.event("Shadow", "ERROR", rule="v9_gates", error=repr(e)[:200])
-            for k in ("old_rules_v5", "new_pair_6h", "buy_pressure"): gates.pop(k, None)   # v10: live now, no longer shadow
+            for k in ("old_rules_v5", "new_pair_6h", "buy_pressure", "organic_50", "sell_spike_avoid", "liq_growth"):
+                gates.pop(k, None)   # v10/v13: live now, no longer shadow
             gates["fomo_score_70"] = (ap.score, ap.score < 70.0, "fomo TikTok bot: every entry shown had Analyst score >= 70")
             gates["liq_100k"] = (c.liq_usd, (c.liq_usd or 0) < 100_000, "pool liquidity >= $100k (deeper pool = smaller gap below the stop)")
             # v12: from shadow_report --features on 210 v8+ trades (no group was significant on its own, both looked best)
