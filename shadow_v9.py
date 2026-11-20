@@ -39,6 +39,8 @@ EXIT_V9 = {
     # v12: limit buy 2% under the live entry's market price, valid 10 min; if filled, live exit rules from the limit price.
     # Not filled = no trade (PnL 0), so it is compared with the live trade it would have replaced.
     "limit_entry_2pct":    dict(lim=0.02, wait_min=10, stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01),
+    # v14: live exit rules, but the exit sells 50% at the trigger and 50% one ghost poll (~30 s) later (smaller impact per swap)
+    "split_exit_2":        dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01, gap_s=30),
 }
 # Shadow entry ideas (ghost uses the live exit rules: LIVE_EXIT).
 ENTRY_V9 = {
@@ -194,6 +196,11 @@ class GhostBook:
             if "tp" in st["steps"]:
                 if px <= peak * (1 - P["trail"]) and rem > 1e-9: out.append((rem, "trail_25"))
             elif px <= ref * (1 - P["stop"]): out.append((rem, "stop_10"))
+        elif rule == "split_exit_2":
+            if st.get("split_ts"):
+                if t - st["split_ts"] >= P["gap_s"]: out.append((rem, "split_2"))
+            elif live_like(P["dist"]):
+                out.append((0.5, "split_1")); st["split_ts"] = t
         elif rule in ("ladder_2x4x_trail18", "tranche_25_50_100"):
             for i, (x, f) in enumerate(P["steps"]):
                 k = f"s{i}"

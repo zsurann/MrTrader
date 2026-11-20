@@ -76,6 +76,11 @@ Su richiesta dell'utente: nuovo `RULESET` → al primo avvio con 0 posizioni il 
 - Feed Helius: in un crollo resta la fonte di uscita se il prezzo dalle riserve è sotto i riferimenti e uno snapshot RPC recente lo conferma.
 - Vendite: quote Jupiter sotto la fascia del 50% usata se l'impatto della route è ≤ 5% (prezzo vero dopo un crollo). Scout: solo coppie SOL/USDC/USDT.
 
+### v14 (2026-11-20): ricerca filtri e uscita in 2 parti
+
+- `shadow_report.py --mine`: 1.984 filtri a 1–2 condizioni provati su 226 trade, nessuno positivo sia sui vecchi (70%) sia sui recenti (30%). Media recenti −1,68 $/trade (storico −6,65).
+- Ghost `split_exit_2`: regole d'uscita live, ma vende 50% allo scatto e 50% circa 30 s dopo.
+
 ### v13 (2026-11-20): 3 filtri ombra diventano live
 
 Approvati dall'utente. Criterio: i trade che il filtro bloccava perdevano più della media (−6,65 $/trade su 230): `organic_50` (blocca 67, −9,3 $ in media), `sell_spike_avoid` (46, −9,4 $), `liq_growth` (57, −7,8 $), tutti con intervallo 90% positivo. Saldo non azzerato: `RULESET` resta `v11_clean`, le nuove posizioni hanno `entry_meta.live_rules = "v13"`. Scartati `strict_v7`/`skeptic` (bloccano tutto) e `min2_smart`/`vol_spike_2x` (bloccano trade meno cattivi della media).
