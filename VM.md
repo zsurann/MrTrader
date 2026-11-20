@@ -76,6 +76,12 @@ Su richiesta dell'utente: nuovo `RULESET` → al primo avvio con 0 posizioni il 
 - Feed Helius: in un crollo resta la fonte di uscita se il prezzo dalle riserve è sotto i riferimenti e uno snapshot RPC recente lo conferma.
 - Vendite: quote Jupiter sotto la fascia del 50% usata se l'impatto della route è ≤ 5% (prezzo vero dopo un crollo). Scout: solo coppie SOL/USDC/USDT.
 
+### v15 (2026-11-20): uscite anticipate, orario, copia smart wallet (solo ombra)
+
+- Ghost `trail_early_6_3` (trailing 3% da +6%) e `be_early_4` (stop a +0,5% dopo +4%): nella v11 il massimo medio dopo l'ingresso era solo +5%.
+- `--features` e `--mine` includono ora d'ingresso e giorno della settimana (Europe/Rome).
+- `copy_smart2`: ogni 15 min `smartwallets.py` legge le ultime transazioni di ogni smart wallet (RPC pubblico, Helius solo come riserva) e registra i token comprati (`sw_copy_buys`). Se 2+ smart wallet comprano la stessa coin entro 30 min → `copy_signals`, e il desk apre un ghost d'ingresso con le uscite live (solo log, anche se lo Scout non l'aveva scelta).
+
 ### v14 (2026-11-20): ricerca filtri e uscita in 2 parti
 
 - `shadow_report.py --mine`: 1.984 filtri a 1–2 condizioni provati su 226 trade, nessuno positivo sia sui vecchi (70%) sia sui recenti (30%). Media recenti −1,68 $/trade (storico −6,65).

@@ -1975,6 +1975,24 @@ class Desk:
             self.shadow_pool.submit(_sk)
         except Exception as e:
             self.log.event("Shadow", "ERROR", error=repr(e))
+    def _copy_entries(self):
+        """v15 SHADOW: open a 'copy_smart2' entry ghost for each new copy_signals row (2+ smart wallets bought the mint)."""
+        if not self.ghosts: return
+        try:
+            with self.log.lock:
+                sig = self.log.db.execute("SELECT mint FROM copy_signals WHERE handled=0").fetchall()
+        except sqlite3.OperationalError: return   # table not created yet by smartwallets.py
+        for (mint,) in sig:
+            with self.log.lock: self.log.db.execute("UPDATE copy_signals SET handled=1 WHERE mint=?", (mint,))
+            d = HTTP.get("https://api.dexscreener.com/tokens/v1/solana/" + mint)
+            ps = [p for p in (d if isinstance(d, list) else []) if (p.get("baseToken") or {}).get("address") == mint
+                  and (p.get("quoteToken") or {}).get("address") in HeliusFeed.QUOTES]
+            if not ps: continue
+            p = max(ps, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+            liq = (p.get("liquidity") or {}).get("usd") or 0; pc = p.get("priceChange") or {}
+            self.ghosts.add_entry("copy_smart2", mint, (p.get("baseToken") or {}).get("symbol"), p["pairAddress"], float(p.get("priceUsd") or 0),
+                                  liq, self.exec.equity()[1], dict(liq=liq, mcap=p.get("marketCap"), chg_h1=pc.get("h1"), chg_m5=pc.get("m5"),
+                                                                   fill_src="model", src="copy_signals"))
     def _v9_entry(self, fp, ap, order):
         """v9 SHADOW entries for Filter passes the live desk did not enter (log only)."""
         if not self.ghosts or order: return
@@ -1991,6 +2009,8 @@ class Desk:
         t_sc = now()
         cands, st = self.scout.run()
         scout_s = now() - t_sc
+        try: self._copy_entries()
+        except Exception as e: self.log.event("Shadow", "ERROR", rule="copy_smart2", error=repr(e)[:200])
         try:   # v12 shadow: market regime = share of scouted coins up over 1h + SOL 24h change (1 extra DexScreener call)
             ch = [x for x in ((c.price_change or {}).get("h1") for c in cands) if x is not None]
             self.breadth = round(sum(1 for x in ch if x > 0) / len(ch), 3) if len(ch) >= 5 else None

@@ -88,7 +88,15 @@ def stats(db, where, args):
                 stop_gap_worst_pct=round(min(g), 2) if g else None)
 
 FEATURES = ("score", "score_old", "age_h", "liq_usd", "mcap", "vol_h1", "chg_m5", "chg_h1", "chg_h6", "top10", "top1",
-            "dev_pct", "bundle", "organic", "smart_count", "entry_slip_pct")
+            "dev_pct", "bundle", "organic", "smart_count", "entry_slip_pct", "hour", "weekday")
+
+def meta_plus(meta, slip, ots):
+    """entry_meta + entry slippage + entry hour / weekday in Europe/Rome (v15)."""
+    m = json.loads(meta); m["entry_slip_pct"] = slip
+    if ots:
+        from datetime import datetime; from zoneinfo import ZoneInfo
+        d = datetime.fromtimestamp(ots, ZoneInfo("Europe/Rome")); m["hour"], m["weekday"] = d.hour, d.weekday()
+    return m
 
 def features(db, ruleset=None):
     """v12: PnL per tertile of every entry feature (entry_meta, closed non-manual trades). A tertile whose 90% interval
@@ -96,8 +104,8 @@ def features(db, ruleset=None):
     where, args = "status='CLOSED' AND COALESCE(exit_reason,'') NOT LIKE 'manual_close%' AND entry_meta IS NOT NULL", []
     if ruleset: where += " AND ruleset=?"; args.append(ruleset)
     rows = []
-    for pnl, slip, meta in db.execute(f"SELECT pnl_usd, entry_slip_pct, entry_meta FROM positions WHERE {where}", args):
-        m = json.loads(meta); m["entry_slip_pct"] = slip; rows.append((pnl or 0.0, m))
+    for pnl, slip, meta, ots in db.execute(f"SELECT pnl_usd, entry_slip_pct, entry_meta, opened_ts FROM positions WHERE {where}", args):
+        rows.append((pnl or 0.0, meta_plus(meta, slip, ots)))
     out = []
     for f in FEATURES:
         v = sorted(((m[f], p) for p, m in rows if isinstance(m.get(f), (int, float))), key=lambda x: x[0])   # value only: ties keep trade order
@@ -117,8 +125,8 @@ def mine(db, min_test=12):
     did not choose from). Survivors are shadow candidates, not proof: 16 features x 4 cuts -> ~2000 combos tested."""
     where = "status='CLOSED' AND COALESCE(exit_reason,'') NOT LIKE 'manual_close%' AND entry_meta IS NOT NULL"
     rows = []
-    for pnl, slip, meta in db.execute(f"SELECT pnl_usd, entry_slip_pct, entry_meta FROM positions WHERE {where} ORDER BY closed_ts"):
-        m = json.loads(meta); m["entry_slip_pct"] = slip; rows.append((pnl or 0.0, m))
+    for pnl, slip, meta, ots in db.execute(f"SELECT pnl_usd, entry_slip_pct, entry_meta, opened_ts FROM positions WHERE {where} ORDER BY closed_ts"):
+        rows.append((pnl or 0.0, meta_plus(meta, slip, ots)))
     cut = int(0.7 * len(rows)); train, test = rows[:cut], rows[cut:]
     conds = []
     for f in FEATURES:

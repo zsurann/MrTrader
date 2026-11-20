@@ -41,6 +41,9 @@ EXIT_V9 = {
     "limit_entry_2pct":    dict(lim=0.02, wait_min=10, stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01),
     # v14: live exit rules, but the exit sells 50% at the trigger and 50% one ghost poll (~30 s) later (smaller impact per swap)
     "split_exit_2":        dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01, gap_s=30),
+    # v15: v11 trades peaked at only +5% on average, so the live trail (+12%) and breakeven (+8%) rarely arm
+    "trail_early_6_3":     dict(stop=0.10, activate=0.06, dist=0.03),
+    "be_early_4":          dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.04, be_lock=0.005),
 }
 # Shadow entry ideas (ghost uses the live exit rules: LIVE_EXIT).
 ENTRY_V9 = {
@@ -166,17 +169,23 @@ class GhostBook:
             open_keys = {(g["rule"], g["mint"]) for g in self.open.values() if g["kind"] == "entry"}
         for rule in hits:
             if n_entry >= V9["max_entry_ghosts"] or (rule, c.mint) in open_keys: continue
-            with self.lock:
-                last = self.db.execute("SELECT MAX(closed_ts) FROM shadow_ghosts WHERE rule=? AND mint=?", (rule, c.mint)).fetchone()[0]
-            if last and now() - last < V9["entry_cooldown_h"] * 3600: continue
-            size = min(self.cfg["max_pos_frac"] * equity, self.cfg["max_liq_frac"] * c.liq_usd)
-            if size < self.cfg.get("min_size_usd", 50): continue
-            ref = c.price_usd
-            fill = ref * (1 + min(0.5, self.cfg["base_slippage"] + self.cfg["swap_fee"] + size / (c.liq_usd / 2)))   # model fill (no Jupiter quote), capped (v8.2)
-            fill *= 1 + self.cfg.get("net_fee_usd", 0) / size   # v11: network fee, like the live buy
-            self._insert(rule, "entry", None, c.mint, c.symbol, c.pair_address, ref, fill, size / fill, size,
-                         dict(score=score, chg_h6=h6, chg_h1=h1, chg_m5=m5, liq=c.liq_usd, mcap=c.mcap, age_h=c.age_h, fill_src="model"))
-            n_entry += 1
+            if self.add_entry(rule, c.mint, c.symbol, c.pair_address, c.price_usd, c.liq_usd, equity,
+                              dict(score=score, chg_h6=h6, chg_h1=h1, chg_m5=m5, liq=c.liq_usd, mcap=c.mcap, age_h=c.age_h, fill_src="model")):
+                n_entry += 1
+
+    def add_entry(self, rule, mint, sym, pair, ref, liq, equity, meta):
+        """One shadow entry ghost (live exit rules) at the model fill. -> True if opened."""
+        with self.mlock:
+            if sum(1 for g in self.open.values() if g["kind"] == "entry") >= V9["max_entry_ghosts"]: return False
+        with self.lock:
+            last = self.db.execute("SELECT MAX(closed_ts) FROM shadow_ghosts WHERE rule=? AND mint=?", (rule, mint)).fetchone()[0]
+        if last and now() - last < V9["entry_cooldown_h"] * 3600: return False
+        size = min(self.cfg["max_pos_frac"] * equity, self.cfg["max_liq_frac"] * liq)
+        if not ref or not liq or size < self.cfg.get("min_size_usd", 50): return False
+        fill = ref * (1 + min(0.5, self.cfg["base_slippage"] + self.cfg["swap_fee"] + size / (liq / 2)))   # model fill (no Jupiter quote), capped (v8.2)
+        fill *= 1 + self.cfg.get("net_fee_usd", 0) / size   # v11: network fee, like the live buy
+        self._insert(rule, "entry", None, mint, sym, pair, ref, fill, size / fill, size, meta)
+        return True
 
     # ---------- exit logic (pure: returns list of (fraction_of_original, reason), and whether the ghost is done)
     @staticmethod
@@ -188,7 +197,8 @@ class GhostBook:
             if peak >= ref * (1 + P.get("activate", 0.12)): stop = max(stop, peak * (1 - dist))
             if P.get("be_arm") and peak >= g["entry_px"] * (1 + P["be_arm"]): stop = max(stop, g["entry_px"] * (1 + P["be_lock"]))
             return px <= stop
-        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10", "grok_stop6_trail12", "limit_entry_2pct"):
+        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10", "grok_stop6_trail12", "limit_entry_2pct",
+                                            "trail_early_6_3", "be_early_4"):
             if live_like(P["dist"]): out.append((rem, "live_rules_stop"))
         elif rule == "tp2x_half_trail25":
             if "tp" not in st["steps"] and px >= ref * P["tp_x"]:

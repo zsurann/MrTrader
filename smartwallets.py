@@ -49,6 +49,9 @@ SW = dict(
     helius_daily_calls=2400, helius_credits_per_call=10, helius_max_pages_per_token=240,
     # v5: Analyst smart factor from Helius (getSignaturesForAddress + getTransaction = 1 credit each, Helius credits page).
     helius_smart=True, helius_smart_daily_credits=12000, smart_compare_every=4,   # v8.1: 15000 -> 12000, paced through the day
+    # v15 SHADOW copy-trading signal: every 15 min read each smart wallet's latest txs (public RPC first), log its token buys;
+    # 2+ smart wallets buying the same mint within 30 min -> copy_signals row (desk opens a shadow entry ghost, log only)
+    copy_poll_s=900, copy_sig_limit=15, copy_window_s=1800, copy_min_wallets=2,
 )
 FACTOR_MAP = {0: 0.0, 1: 45.0, 2: 75.0}   # 3+ -> 100
 PTP = dict(frac=0.40, tp_pct=0.15)          # shadow partial take-profit: 40% at +15%, 60% rides the real exit
@@ -154,7 +157,27 @@ CREATE TABLE IF NOT EXISTS helius_usage(day TEXT PRIMARY KEY, calls INT, purpose
 CREATE TABLE IF NOT EXISTS helius_smart_usage(day TEXT PRIMARY KEY, credits INT, lookups INT, fallbacks INT);
 CREATE INDEX IF NOT EXISTS sw_entries_wallet ON sw_entries(wallet);
 CREATE INDEX IF NOT EXISTS smart_wallets_smart ON smart_wallets(is_smart);
+CREATE TABLE IF NOT EXISTS sw_copy_seen(wallet TEXT PRIMARY KEY, last_sig TEXT);
+CREATE TABLE IF NOT EXISTS sw_copy_buys(wallet TEXT, mint TEXT, ts REAL, PRIMARY KEY(wallet, mint, ts));
+CREATE TABLE IF NOT EXISTS copy_signals(mint TEXT PRIMARY KEY, ts REAL, wallets TEXT, handled INT DEFAULT 0);
 """
+QUOTE_MINTS = {SOL_MINT, "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
+
+def bought_mints(tx, wallet):
+    """v15: mints (not SOL/USDC/USDT) whose balance owned by `wallet` grew in a successful tx."""
+    try:
+        meta = tx["meta"]
+        if meta.get("err"): return []
+        def tot(arr):
+            d = {}
+            for b in arr or []:
+                if b.get("owner") == wallet:
+                    d[b["mint"]] = d.get(b["mint"], 0.0) + float((b.get("uiTokenAmount") or {}).get("uiAmount") or 0)
+            return d
+        pre, post = tot(meta.get("preTokenBalances")), tot(meta.get("postTokenBalances"))
+        return [m for m, v in post.items() if m not in QUOTE_MINTS and v > pre.get(m, 0.0)]
+    except Exception:
+        return []
 def ensure_schema(db): db.executescript(SCHEMA)
 
 def now(): return time.time()
@@ -711,10 +734,36 @@ class Builder:
                          peak=peak, actual_pnl_usd=round(pnl or 0, 2), shadow_pnl_usd=round(spnl, 2),
                          shadow_pnl_pct=round(100 * spnl / size, 2) if size else None)
 
+    def copy_poll(self):
+        """v15 SHADOW: smart wallets' fresh token buys -> copy_signals when >= copy_min_wallets agree within copy_window_s."""
+        if now() - getattr(self, "_copy_ts", 0) < SW["copy_poll_s"]: return
+        self._copy_ts = now()
+        seen = dict(self.q("SELECT wallet,last_sig FROM sw_copy_seen"))
+        for (w,) in self.q("SELECT address FROM smart_wallets WHERE is_smart=1"):
+            r = self.rpc("getSignaturesForAddress", [w, {"limit": SW["copy_sig_limit"]}]) or []
+            if not r: continue
+            self.x("INSERT OR REPLACE INTO sw_copy_seen VALUES(?,?)", (w, r[0]["signature"]))
+            if w not in seen: continue   # first sight: bookmark only, no backfill
+            new = []
+            for x in r:
+                if x.get("signature") == seen[w]: break
+                if not x.get("err"): new.append(x)
+            for x, tx in zip(new, self.get_txs([x["signature"] for x in new])):
+                for m in bought_mints(tx or {}, w):
+                    self.x("INSERT OR IGNORE INTO sw_copy_buys VALUES(?,?,?)", (w, m, x.get("blockTime") or now()))
+        for m, n, ws, ts in self.q("SELECT mint, COUNT(DISTINCT wallet), GROUP_CONCAT(DISTINCT wallet), MAX(ts) FROM sw_copy_buys "
+                                   "WHERE ts>=? GROUP BY mint HAVING COUNT(DISTINCT wallet)>=?",
+                                   (now() - SW["copy_window_s"], SW["copy_min_wallets"])):
+            if self.q("SELECT 1 FROM copy_signals WHERE mint=?", (m,)): continue
+            self.x("INSERT INTO copy_signals(mint,ts,wallets) VALUES(?,?,?)", (m, ts, ws))
+            shadow_event(self.db, self.lock, self.jsonl, "copy_smart2", "SIGNAL", m, None, None, wallets=ws.split(","), n=n)
+
     def shadow_loop(self):
         while not self.stop.is_set():
             try: self.shadow_exit_poll(); self.shadow_reconcile(); self.shadow_partial_tp()
             except Exception as e: self.log("SW_SHADOW_ERROR", error=repr(e), tb=traceback.format_exc()[-600:])
+            try: self.copy_poll()
+            except Exception as e: self.log("SW_COPY_ERROR", error=repr(e), tb=traceback.format_exc()[-600:])
             self.stop.wait(SW["shadow_poll_s"])
 
     def main(self, seed_only=False, max_tokens=None):
