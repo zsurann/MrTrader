@@ -1932,6 +1932,19 @@ class Desk:
                                   "small coins only: mcap <= $240k and liquidity <= $44k")
             t10 = (ap.fp.checks or {}).get("top10_pct_ex_pools")
             gates["top10_21"] = (t10, None if t10 is None else t10 < 21.0, "top-10 holders >= 21% (concentrated holders did better)")
+            # v12: from the "Grok Bot overnight" prompt video (rules only; its results were illustrative)
+            inp = ap.components.get("_inputs") or {}
+            hg = inp.get("holder_growth") if isinstance(inp.get("holder_growth"), dict) else {}
+            H = hg.get("holders")
+            gates["holders_300"] = (H, None if H is None else H < 300, "at least 300 holders")
+            tx5 = (c.txns or {}).get("m5") or {}; b5, s5 = tx5.get("buys") or 0, tx5.get("sells") or 0
+            v5, v1 = (c.vol or {}).get("m5"), (c.vol or {}).get("h1")
+            sm = (inp.get("smart_wallets") or {}).get("count") if isinstance(inp.get("smart_wallets"), dict) else None
+            g_ = next((hg[k] for k in ("pct_per_h", "pct_1h", "per_h") if hg.get(k) is not None), None)
+            sig = dict(vol_spike_5x=bool(v5 and v1 and v5 * 12 / v1 >= 5), buys_70=(b5 + s5) > 0 and b5 / (b5 + s5) >= 0.7,
+                       holders_up=g_ is not None and g_ > 0, smart_3=(sm or 0) >= 3)
+            gates["two_signals"] = (sig, sum(sig.values()) < 2, "at least 2 of: 5m volume >= 5x the 1h average, >= 70% buys (5m), "
+                                    "holders growing, >= 3 smart wallets")
             b, s24 = self.breadth, self.sol_h24
             gates["market_hot"] = (dict(breadth=b, sol_h24=s24), None if b is None or s24 is None else not (b >= 0.5 and s24 > 0),
                                    "market hot: >= 50% of scouted coins up over 1h and SOL up over 24h")
