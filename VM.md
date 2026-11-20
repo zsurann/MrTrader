@@ -76,6 +76,10 @@ Su richiesta dell'utente: nuovo `RULESET` → al primo avvio con 0 posizioni il 
 - Feed Helius: in un crollo resta la fonte di uscita se il prezzo dalle riserve è sotto i riferimenti e uno snapshot RPC recente lo conferma.
 - Vendite: quote Jupiter sotto la fascia del 50% usata se l'impatto della route è ≤ 5% (prezzo vero dopo un crollo). Scout: solo coppie SOL/USDC/USDT.
 
+### v16 (2026-11-20): ombra slip_gt3
+
+Analisi di 231 trade (Supabase, sola lettura): media −6,5%/trade, costi ~5,3%, 31% dei trade mai sopra l'ingresso, stop chiusi in media a −17%. Unico gruppo positivo: slippage d'ingresso > 3% (+91 $ in totale, ma −7,5% nella prima metà e +5,5% nella seconda). Regola ombra `slip_gt3` per verificarlo sui trade nuovi.
+
 ### v15 (2026-11-20): uscite anticipate, orario, copia smart wallet (solo ombra)
 
 - Ghost `trail_early_6_3` (trailing 3% da +6%) e `be_early_4` (stop a +0,5% dopo +4%): nella v11 il massimo medio dopo l'ingresso era solo +5%.

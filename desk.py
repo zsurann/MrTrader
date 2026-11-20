@@ -1957,6 +1957,8 @@ class Desk:
             if order:   # v11: only decidable for real entries (the quote is taken by the Executor)
                 lim = CFG["shadow_max_entry_slip_pct"]
                 gates["entry_slip_15"] = (order.slippage_pct, order.slippage_pct > lim, f"skip if the fill is > {lim}% above the market price")
+                # v16: the only positive group in the 231-trade analysis (small, fast pools), unstable between halves
+                gates["slip_gt3"] = (order.slippage_pct, order.slippage_pct <= 3.0, "only entries whose fill is > 3% above the market price")
             if order and self.ghosts and pid:
                 try: self.ghosts.on_live_entry(pid, order, ap)   # v9 ghost exit variants for this live entry
                 except Exception as e: self.log.event("Shadow", "ERROR", rule="ghost_v9_entry", error=repr(e)[:200])
