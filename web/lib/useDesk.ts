@@ -57,6 +57,10 @@ export function useDesk(): DeskState {
 
   useEffect(() => {
     let cancelled = false;
+    let liveNow: LiveState | null = null;
+    // The phone suspends the realtime socket in the background and it does not come back: reload when the tab returns offline.
+    const onVis = () => { if (document.visibilityState === "visible" && liveNow === "offline") window.location.reload(); };
+    document.addEventListener("visibilitychange", onVis);
     // Realtime events arrive in bursts at the end of each scan; coalesce them into one render per animation frame.
     let queue: Change[] = [];
     let raf = 0;
@@ -75,7 +79,7 @@ export function useDesk(): DeskState {
         if (cancelled) return;
         const live: LiveState | null = state === "SUBSCRIBED" ? "live"
           : state === "CLOSED" || state === "CHANNEL_ERROR" || state === "TIMED_OUT" ? "offline" : null;
-        if (live) set((st) => (st.live === live ? st : { ...st, live }));
+        if (live) { liveNow = live; set((st) => (st.live === live ? st : { ...st, live })); }
       });
 
     (async () => {
@@ -108,7 +112,7 @@ export function useDesk(): DeskState {
       });
     })();
 
-    return () => { cancelled = true; if (raf) cancelAnimationFrame(raf); sb.removeChannel(channel); };
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVis); if (raf) cancelAnimationFrame(raf); sb.removeChannel(channel); };
   }, []);
 
   // v11: the paper ledger restarts at each epoch (desk ledger 'epoch_ts', sent in desk_status.cfg); older trades stay in the database
