@@ -111,13 +111,49 @@ def features(db, ruleset=None):
                             ci_lo=None if lo is None else round(lo / n, 2), ci_hi=None if hi is None else round(hi / n, 2)))
     return dict(trades=len(rows), rows=out)
 
+def mine(db, min_test=12):
+    """v14: search 1- and 2-condition entry filters (feature <= or >= its tertile cut) on closed trades, in time order:
+    first 70% = training, last 30% = test. Keep only filters with mean PnL > 0 in BOTH halves (test = trades the search
+    did not choose from). Survivors are shadow candidates, not proof: 16 features x 4 cuts -> ~2000 combos tested."""
+    where = "status='CLOSED' AND COALESCE(exit_reason,'') NOT LIKE 'manual_close%' AND entry_meta IS NOT NULL"
+    rows = []
+    for pnl, slip, meta in db.execute(f"SELECT pnl_usd, entry_slip_pct, entry_meta FROM positions WHERE {where} ORDER BY closed_ts"):
+        m = json.loads(meta); m["entry_slip_pct"] = slip; rows.append((pnl or 0.0, m))
+    cut = int(0.7 * len(rows)); train, test = rows[:cut], rows[cut:]
+    conds = []
+    for f in FEATURES:
+        v = sorted(m[f] for _, m in train if isinstance(m.get(f), (int, float)))
+        if len(v) < 15 or len(set(v)) < 3: continue
+        for t in (v[len(v) // 3], v[2 * len(v) // 3]):
+            conds += [(f"{f} <= {t:.4g}", lambda m, f=f, t=t: isinstance(m.get(f), (int, float)) and m[f] <= t),
+                      (f"{f} >= {t:.4g}", lambda m, f=f, t=t: isinstance(m.get(f), (int, float)) and m[f] >= t)]
+    def stat(part, fs):
+        p = [x for x, m in part if all(fn(m) for _, fn in fs)]
+        return len(p), (sum(p) / len(p) if p else 0.0)
+    out = []
+    combos = [(c,) for c in conds] + [(a, b) for i, a in enumerate(conds) for b in conds[i + 1:] if a[0].split()[0] != b[0].split()[0]]
+    for fs in combos:
+        n1, m1 = stat(train, fs); n2, m2 = stat(test, fs)
+        if n2 >= min_test and n1 >= 2 * min_test and m1 > 0 and m2 > 0:
+            out.append(dict(rule=" AND ".join(c[0] for c in fs), n_train=n1, mean_train=round(m1, 2), n_test=n2, mean_test=round(m2, 2)))
+    out.sort(key=lambda x: -min(x["mean_train"], x["mean_test"]))
+    return dict(trades=len(rows), train=len(train), test=len(test), tested=len(combos), base_test=round(stat(test, ())[1], 2), rows=out[:20])
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=os.path.join(os.environ.get("MEMEDESK_DATA", "/opt/memedesk"), "desk.sqlite"))
     ap.add_argument("--ruleset", help="only positions tagged with this ruleset (e.g. v8_loose, v10_sel)")
     ap.add_argument("--all", action="store_true", help="also list the rules that are live now (retired from shadow)")
     ap.add_argument("--features", action="store_true", help="PnL per tertile of each entry feature instead of the shadow board")
+    ap.add_argument("--mine", action="store_true", help="search 1-2 condition filters profitable in both the old and the recent trades")
     a = ap.parse_args()
+    if a.mine:
+        r = mine(sqlite3.connect(f"file:{a.db}?mode=ro", uri=True))
+        print(f"trade {r['trades']} (vecchi {r['train']} / recenti {r['test']}), combinazioni provate {r['tested']}, "
+              f"media $/trade recenti senza filtro {r['base_test']:+.2f}; sopravvissute (positive in entrambi): {len(r['rows'])}")
+        for x in r["rows"]:
+            print(f"{x['rule'][:70]:70} vecchi n={x['n_train']:3d} {x['mean_train']:+6.2f}  recenti n={x['n_test']:3d} {x['mean_test']:+6.2f}")
+        raise SystemExit
     if a.features:
         fr = features(sqlite3.connect(f"file:{a.db}?mode=ro", uri=True), a.ruleset)
         print(f"trade con caratteristiche d'ingresso: {fr['trades']}  (media $/trade per terzo; [IC 90%]; ✓ = anche il bordo basso > 0)")
