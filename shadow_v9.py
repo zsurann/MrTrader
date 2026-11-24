@@ -2,6 +2,7 @@
 MemeDesk v9 SHADOW rules (LOG ONLY). Nothing here ever opens, closes or resizes a live paper position.
 
 Ghost tracker: every live entry spawns one hypothetical copy ("ghost") per exit variant, with the same entry
+(v14: while the live position is open, exit-variant ghosts also get every live price tick -- see GhostBook.on_tick)
 fill, size and qty. Ghosts are priced from batched DexScreener pair quotes every `poll_s` seconds and live on
 after the real position closes (up to `horizon_h`), so ladders / moonbags / wide trails are measured to their own
 end instead of being cut by the live exit. Exit fills use the same paper fill as the live desk (Jupiter quote
@@ -14,12 +15,16 @@ Filter safety check). They get a ghost with the live exit rules, so their hypoth
 Entry gates (would_block flags on live entries) are written by desk.shadow_entry_gate via `entry_gates()`.
 """
 import json, math, threading, time, traceback
+from concurrent.futures import ThreadPoolExecutor
 
-V9 = dict(poll_s=30, horizon_h=24.0, max_entry_ghosts=40, entry_cooldown_h=1.0, sample_keep=20)
+V9 = dict(poll_s=30, horizon_h=24.0, max_entry_ghosts=60, entry_cooldown_h=1.0, sample_keep=20)
 
 # Exit variants (parameters are fractions of the market reference price at entry, like the live rules).
 EXIT_V9 = {
-    "ghost_live_baseline": dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01),   # = LIVE_EXIT (v10 live rules at ghost cadence)
+    "ghost_live_baseline": dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01),   # = LIVE_EXIT; v14: fed the live price ticks (Helius)
+    # v14: the same live rules priced ONLY by the 30 s DexScreener ghost poll (the pre-v14 ghost cadence). Its drift vs live
+    # measures the sampling bias that shadow ENTRY ghosts still have (they have no live position, so no Helius ticks).
+    "ghost_live_poll30":   dict(stop=0.10, activate=0.12, dist=0.04, be_arm=0.08, be_lock=0.01),
     "tp2x_half_trail25":   dict(stop=0.10, tp_x=2.0, tp_frac=0.50, trail=0.25),            # take initials at 2x, rest trails 25%
     "ladder_2x4x_trail18": dict(stop=0.30, steps=((2.0, 0.50), (4.0, 0.25)), trail=0.18),  # -30% stop, 50% @2x, 25% @4x, rest 18% under high (never below entry)
     "profit_lock":         dict(stop=0.10, locks=((0.5, 0.0), (1.0, 0.5)), trail_after=3.0, trail=0.40),
@@ -50,7 +55,18 @@ ENTRY_V9 = {
     "dip_after_pump": dict(h6_min=50.0, h1_max=-10.0, h1_min=-35.0, m5_min=0.0),
     "score_45_55":    dict(lo=45.0, hi=55.0),
     "migration_dip":  dict(max_since_mig_h=6.0, h1_max=-20.0, m5_min=0.0),
+    # v14 "pre-pump" ideas (the live desk buys after +18% 1h median and peaks at +3%): coins still flat with early activity.
+    # All need h1 in [-5%, +5%) and m5 in [-3%, +3%] (no 5m spike); they come from Filter passes, so every safety check passed.
+    "prepump_vol":    dict(h1_lo=-5.0, h1_hi=5.0, m5_lo=-3.0, m5_hi=3.0, vol_rate_x=2.0, min_b5=5),          # 5m volume rate >= 2x the 1h rate, buys >= sells (5m)
+    "prepump_buys":   dict(h1_lo=-5.0, h1_hi=5.0, m5_lo=-3.0, m5_hi=3.0, buy_share_5m=0.60, r_h1=1.2, min_b5=5),  # >= 60% buys (5m) and buys/sells >= 1.2 (1h)
+    "prepump_both":   dict(h1_lo=-5.0, h1_hi=5.0, m5_lo=-3.0, m5_hi=3.0),                                     # both signals at once
 }
+# v14: retired rules (consistently worst, or never blocking anything). No new ghosts / events; history stays in the DB and
+# open ghosts of these rules finish with their own parameters (kept above).
+RETIRED_V14 = {"ladder_2x4x_trail18", "profit_lock", "tp2x_half_trail25", "wide_stop50_trail20", "limit_entry_2pct", "trail_early_6_3",
+               "copy_smart2", "score_45_55", "migration_dip", "dip_after_pump", "churn_50", "top1_10", "small_trades_200", "fomo_score_70"}
+ACTIVE_EXIT = [r for r in EXIT_V9 if r not in RETIRED_V14]
+POLL_ONLY = {"ghost_live_poll30"}   # never fed the live ticks
 LIVE_EXIT = EXIT_V9["ghost_live_baseline"]   # v10: trail 4%, breakeven +1% after +8% (smart_exit not modeled)
 
 SCHEMA = """
@@ -114,6 +130,24 @@ def entry_gates(c, ap, liq_hist, mig_ts):
     return g
 
 
+def prepump_signals(c):
+    """v14 SHADOW pre-pump signals for one Scout candidate. Pure. -> dict(vol=bool, buys=bool, values=dict)."""
+    pc = c.price_change or {}; tx = c.txns or {}; vol = c.vol or {}
+    h1, m5 = pc.get("h1"), pc.get("m5")
+    b5 = (tx.get("m5") or {}).get("buys") or 0; s5 = (tx.get("m5") or {}).get("sells") or 0
+    b1 = (tx.get("h1") or {}).get("buys") or 0; s1 = (tx.get("h1") or {}).get("sells") or 0
+    v5, v1 = vol.get("m5"), vol.get("h1")
+    E = ENTRY_V9["prepump_vol"]
+    flat = h1 is not None and m5 is not None and E["h1_lo"] <= h1 < E["h1_hi"] and E["m5_lo"] <= m5 <= E["m5_hi"]
+    rate = (v5 * 12 / v1) if (v5 and v1) else None
+    sig_v = bool(flat and rate is not None and rate >= E["vol_rate_x"] and b5 >= E["min_b5"] and b5 >= s5)
+    B = ENTRY_V9["prepump_buys"]
+    share = b5 / (b5 + s5) if (b5 + s5) else None
+    sig_b = bool(flat and share is not None and share >= B["buy_share_5m"] and b5 >= B["min_b5"] and b1 >= B["r_h1"] * max(s1, 1))
+    return dict(vol=sig_v, buys=sig_b, values=dict(h1=h1, m5=m5, vol_rate_5m_vs_1h=None if rate is None else round(rate, 2),
+                                                    buy_share_5m=None if share is None else round(share, 3), b5=b5, s5=s5, b1=b1, s1=s1))
+
+
 class GhostBook:
     def __init__(self, db, lock, jsonl, http_get, sell_fill, cfg, log_event, shadow_event):
         self.db, self.lock, self.jsonl = db, lock, jsonl
@@ -124,8 +158,11 @@ class GhostBook:
             cols = [d[1] for d in self.db.execute("PRAGMA table_info(shadow_ghosts)")]
             for r in self.db.execute("SELECT * FROM shadow_ghosts WHERE status='OPEN'"):
                 d = dict(zip(cols, r)); d["state"] = json.loads(d["state"] or "{}"); d["meta"] = json.loads(d["meta"] or "{}")
+                d["state"].pop("busy", None)   # v14: a fill in flight at shutdown is simply re-decided
                 self.open[d["id"]] = d
         self.mlock = threading.Lock()
+        self.glock = threading.RLock()   # v14: ghost decisions come from two threads (30 s poll + live price ticks)
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ghost-fill")   # tick-path fills never block the live feed
 
     # ---------- creation
     def _insert(self, rule, kind, pid, mint, sym, pair, ref, entry_px, qty, size, meta):
@@ -145,7 +182,7 @@ class GhostBook:
     def on_live_entry(self, pid, order, ap):
         c = ap.fp.cand; pc = c.price_change or {}
         meta = dict(score=ap.score, chg_h1=pc.get("h1"), chg_m5=pc.get("m5"), liq=c.liq_usd, mcap=c.mcap, age_h=c.age_h)
-        for rule in EXIT_V9:
+        for rule in ACTIVE_EXIT:
             try: self._insert(rule, "exit_variant", pid, order.mint, order.symbol, order.pair_address, order.ref_price, order.fill_price,
                               order.qty, order.size_usd, meta)
             except Exception as e: self.ev("Shadow", "ERROR", rule=rule, error=repr(e)[:200])
@@ -155,14 +192,10 @@ class GhostBook:
         c = fp.cand
         if c.mint in live_open_mints or not c.price_usd or not c.liq_usd: return
         pc = c.price_change or {}; h6, h1, m5 = pc.get("h6"), pc.get("h1"), pc.get("m5")
-        hits = []
-        E = ENTRY_V9["dip_after_pump"]
-        if None not in (h6, h1, m5) and h6 >= E["h6_min"] and E["h1_min"] <= h1 <= E["h1_max"] and m5 >= E["m5_min"]: hits.append("dip_after_pump")
-        E = ENTRY_V9["score_45_55"]
-        if score is not None and E["lo"] <= score < E["hi"]: hits.append("score_45_55")
-        E = ENTRY_V9["migration_dip"]
-        if mig_ts and (now() - mig_ts) / 3600 <= E["max_since_mig_h"] and h1 is not None and m5 is not None and h1 <= E["h1_max"] and m5 >= E["m5_min"]:
-            hits.append("migration_dip")
+        hits, pp = [], prepump_signals(c)   # v14: dip_after_pump / score_45_55 / migration_dip retired (no new ghosts)
+        if pp["vol"]: hits.append("prepump_vol")
+        if pp["buys"]: hits.append("prepump_buys")
+        if pp["vol"] and pp["buys"]: hits.append("prepump_both")
         if not hits: return
         with self.mlock:
             n_entry = sum(1 for g in self.open.values() if g["kind"] == "entry")
@@ -170,7 +203,8 @@ class GhostBook:
         for rule in hits:
             if n_entry >= V9["max_entry_ghosts"] or (rule, c.mint) in open_keys: continue
             if self.add_entry(rule, c.mint, c.symbol, c.pair_address, c.price_usd, c.liq_usd, equity,
-                              dict(score=score, chg_h6=h6, chg_h1=h1, chg_m5=m5, liq=c.liq_usd, mcap=c.mcap, age_h=c.age_h, fill_src="model")):
+                              dict(score=score, chg_h6=h6, chg_h1=h1, chg_m5=m5, liq=c.liq_usd, mcap=c.mcap, age_h=c.age_h, fill_src="model",
+                                   prepump=pp.get("values"), pricing="dexscreener_poll_30s")):
                 n_entry += 1
 
     def add_entry(self, rule, mint, sym, pair, ref, liq, equity, meta):
@@ -197,7 +231,7 @@ class GhostBook:
             if peak >= ref * (1 + P.get("activate", 0.12)): stop = max(stop, peak * (1 - dist))
             if P.get("be_arm") and peak >= g["entry_px"] * (1 + P["be_arm"]): stop = max(stop, g["entry_px"] * (1 + P["be_lock"]))
             return px <= stop
-        if kind == "entry" or rule in ("ghost_live_baseline", "wide_stop50_trail20", "fomo_stop6_trail10", "grok_stop6_trail12", "limit_entry_2pct",
+        if kind == "entry" or rule in ("ghost_live_baseline", "ghost_live_poll30", "wide_stop50_trail20", "fomo_stop6_trail10", "grok_stop6_trail12", "limit_entry_2pct",
                                             "trail_early_6_3", "be_early_4"):
             if live_like(P["dist"]): out.append((rem, "live_rules_stop"))
         elif rule == "tp2x_half_trail25":
@@ -260,32 +294,70 @@ class GhostBook:
         return prices
 
     def tick(self):
+        """30 s DexScreener poll of every open ghost (the only price source once the live position is closed)."""
         with self.mlock: ghosts = list(self.open.values())
         if not ghosts: return
         prices = self._prices(sorted({g["pair"] for g in ghosts}))
         t = now()
         for g in ghosts:
-            st = g["state"]; px, liq = prices.get(g["pair"], (0, 0))
+            px, liq = prices.get(g["pair"], (0, 0))
+            self._process(g, px, liq, t, from_tick=False)
+
+    def on_tick(self, pair, px, liq, reuse=None):
+        """v14: a price the LIVE desk just used for its own exit rules (Helius reserves, or its DexScreener fallback poll).
+        Exit-variant ghosts on that pair see the same ticks as the live position, so ghost_live_baseline closes on the
+        same tick at the same fill (reuse) instead of missing the wick between two 30 s polls. Entry ghosts and
+        POLL_ONLY rules are not fed. Decisions run here; fills run on the ghost-fill worker (never blocks the feed)."""
+        if not px or px <= 0: return
+        with self.mlock:
+            ghosts = [g for g in self.open.values() if g["pair"] == pair and g["kind"] == "exit_variant" and g["rule"] not in POLL_ONLY]
+        t = now()
+        for g in ghosts: self._process(g, px, liq, t, from_tick=True, reuse=reuse)
+
+    def _process(self, g, px, liq, t, from_tick, reuse=None):
+        with self.glock:
+            if g["id"] not in self.open: return
+            st = g["state"]
+            if st.get("busy"): return
             horizon = t - g["opened_ts"] >= V9["horizon_h"] * 3600
             if not px:
+                if from_tick: return
                 if horizon or t - (st.get("last_ts") or g["opened_ts"]) > 3600:   # no quote for 1h (pair gone) -> close at last price, flagged
-                    self._sell(g, st, st["rem"], "no_price", st.get("last_px") or g["ref"], 0)
-                    self._close(g, st, "no_price")
-                continue
-            if g["rule"] == "limit_entry_2pct" and not st.get("filled") and self._limit(g, st, px, t): continue
-            st["peak"] = max(st["peak"], px); st["last_px"], st["last_ts"] = px, t
-            st["samples"] = (st["samples"] + [px])[-V9["sample_keep"]:]
-            acts = [] if horizon else self.decide(g["rule"], g["kind"], g, st, px, t)
-            if horizon: acts = [(st["rem"], "horizon_24h")]
+                    acts, px, liq = [(st["rem"], "no_price")], st.get("last_px") or g["ref"], 0
+                else: return
+            else:
+                if g["rule"] == "limit_entry_2pct" and not st.get("filled"):
+                    if not from_tick: self._limit(g, st, px, t)
+                    return
+                st["peak"] = max(st["peak"], px); st["last_px"], st["last_ts"] = px, t
+                if not from_tick or t - st.get("sample_ts", 0) >= V9["poll_s"]:   # chandelier ATR keeps its ~30 s sample spacing
+                    st["samples"] = (st["samples"] + [px])[-V9["sample_keep"]:]; st["sample_ts"] = t
+                acts = [(st["rem"], "horizon_24h")] if horizon else self.decide(g["rule"], g["kind"], g, st, px, t)
+                if from_tick: st["fed_ticks"] = st.get("fed_ticks", 0) + 1
+            if not acts:
+                if not from_tick:
+                    with self.lock: self.db.execute("UPDATE shadow_ghosts SET state=? WHERE id=?", (json.dumps(st), g["id"]))
+                return
+            st["busy"] = True
+        job = lambda: self._exec(g, st, acts, px, liq, reuse, "live_tick" if from_tick else "ghost_poll")
+        if from_tick: self.pool.submit(job)
+        else: job()
+
+    def _exec(self, g, st, acts, px, liq, reuse, via):
+        try:
             reason = None
             for frac, why in acts:
                 frac = min(frac, st["rem"])
                 if frac <= 1e-9: continue
-                self._sell(g, st, frac, why, px, liq); reason = why
+                self._sell(g, st, frac, why, px, liq, reuse); reason = why
+            st["exit_via"] = via
             if st["rem"] <= 1e-9: self._close(g, st, reason)
             else:
-                with self.lock:
-                    self.db.execute("UPDATE shadow_ghosts SET state=? WHERE id=?", (json.dumps(st), g["id"]))
+                with self.lock: self.db.execute("UPDATE shadow_ghosts SET state=? WHERE id=?", (json.dumps(st), g["id"]))
+        except Exception as e:
+            self.ev("Shadow", "ERROR", rule=g.get("rule"), error=repr(e)[:200], tb=traceback.format_exc()[-600:])
+        finally:
+            st["busy"] = False
 
     def _limit(self, g, st, px, t):
         """v12 limit_entry_2pct while pending. -> True if the ghost must skip this tick (still waiting, or closed unfilled)."""
@@ -302,10 +374,10 @@ class GhostBook:
             self._close(g, st, "limit_not_filled"); return True
         return True
 
-    def _sell(self, g, st, frac, why, px, liq):
+    def _sell(self, g, st, frac, why, px, liq, reuse=None):
         q = frac * g["qty"]
         if liq:
-            exit_px, src, model_px, _ = self.sell_fill(g["mint"], q, px, liq)
+            exit_px, src, model_px, _ = self.sell_fill(g["mint"], q, px, liq, reuse=reuse)
         else:
             exit_px, src = px * (1 - self.cfg["base_slippage"] - self.cfg["swap_fee"]), "model_no_liq"
         if not exit_px or exit_px <= 0 or not math.isfinite(exit_px): exit_px, src = px * 0.5, "guard_floor"   # v8.2: never a negative fill

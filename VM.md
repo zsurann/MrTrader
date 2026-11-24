@@ -49,7 +49,22 @@ VM=user@host KEY=/path/to/ssh_key ./vm_status.sh
 
 In console Oracle non usare Terminate: cancellerebbe la VM. Stop e Reboot fermano il desk.
 
-## Regole live attuali (v10_sel, 2026-11-19)
+## Regole live attuali (v14_age24, 2026-11-24)
+
+Solo paper. Come `v10_sel` + filtri v13, con **una sola differenza approvata dall'utente: età massima della coppia nello Scout 6 h → 24 h** (`CFG.max_age_h`). Nuovo `RULESET = "v14_age24"`: al primo avvio con 0 posizioni il saldo paper riparte da **1.000 $** (`ledger.epoch_v14_age24` / `epoch_ts`); le nuove posizioni hanno `entry_meta.live_rules = "v14"`. Le posizioni e i dati ombra vecchi restano nel database con il loro `ruleset` (`v8_loose`, `v10_sel`, `v11_clean`).
+
+### v14 (2026-11-24): pulizia DB, ombra più onesta, regole ritirate, pre-pump
+
+- **Database.** Gli scarti dello Scout (~170k righe al giorno, quasi tutte "pair too old") sono salvati in `kills` una volta per moneta + motivo al giorno; i conteggi per ciclo vanno in `cycles.stats.scout_kill_reasons` e il syncer li usa per i grafici. `kills` tiene solo le ultime 48 h (pulizia oraria a blocchi da 5.000). Nuovo indice `kills(stage, ts)`. Nuova tabella `scout_seen` (prima/massima mcap per moneta, 8 giorni) letta da `smartwallets.refresh_winners` invece di 7 giorni di `kills`. Il riepilogo `summary.txt` (prima scansionava tutto `kills` a ogni ciclo, ~100 s sulla VM: era la causa dei cicli a ~300 s) ora si scrive ogni 20 cicli, sulle ultime 24 h, in un thread a parte. VACUUM fatto al deploy a desk fermo.
+- **Smart wallet.** Corretto il `KeyError` in `refresh_winners` (`cand[m]` su un token base inatteso da DexScreener): la lista non si aggiornava più. Copia degli acquisti smart (`copy_poll`) spenta perché `copy_smart2` è ritirata; cache ATA limitata.
+- **Ghost.** Mentre la posizione live è aperta, i ghost delle varianti d'uscita ricevono gli stessi prezzi della regola live (Helius o il poll di riserva) via `GhostBook.on_tick`; le vendite dei ghost girano in un worker separato e non rallentano il feed. `ghost_live_baseline` alla chiusura live usa lo stesso fill: deriva attesa ≈ 0. Nuova baseline `ghost_live_poll30` = regole live solo col poll DexScreener ogni 30 s (il vecchio modo): la sua deriva dalla live misura il bias dei ghost d'ingresso, che non hanno Helius.
+- **Classifica (`shadow_report.py` e dashboard).** Metriche in % per trade. Filtri d'ingresso: media dei trade che il filtro *lascia passare* contro la media live (bootstrap), non più "blocca i perdenti = meglio". Varianti d'uscita: differenza appaiata contro la baseline. Correzione Benjamini-Hochberg su tutte le regole (q < 0,10) e almeno 15 trade; verdetti `promising`, `promising (still losing)`, `no evidence`, `too few`. Sezione `drift` per le due baseline. In dashboard la ✓ compare solo per le regole `promising` (i suoi numeri sono % per trade); i testi della pagina web non sono stati aggiornati.
+- **Ritirate** (niente nuovi ghost/eventi, storico conservato): `ladder_2x4x_trail18`, `profit_lock`, `tp2x_half_trail25`, `wide_stop50_trail20`, `limit_entry_2pct`, `trail_early_6_3`, `copy_smart2`, `score_45_55`, `migration_dip`, `dip_after_pump`, e i filtri che non bloccavano niente `churn_50`, `top1_10`, `small_trades_200`, `fomo_score_70`. `new_pair_6h` torna filtro ombra (età ≤ 6 h), dato che la live ora arriva a 24 h.
+- **Nuovi ingressi ombra "pre-pump"** (solo log, uscite live, prezzi dal poll 30 s): su monete che hanno passato tutti i controlli del Filter, con 1 h tra −5% e +5% e 5 min tra −3% e +3%. `prepump_vol`: volume 5 min ≥ 2× il ritmo dell'ultima ora, almeno 5 acquisti e acquisti ≥ vendite (5 min). `prepump_buys`: ≥ 60% acquisti a 5 min (almeno 5) e acquisti/vendite ≥ 1,2 a 1 h. `prepump_both`: entrambi. Fill modello, come gli altri ingressi ombra. Massimo 60 ghost d'ingresso aperti.
+
+Le sezioni sotto sono uno storico.
+
+## Regole v10_sel (2026-11-19)
 
 Solo paper. Le sezioni sotto sono uno storico. Fonte di verità: `CFG` in `desk.py`. Classifica delle regole ombra: `sudo python3 /opt/memedesk/shadow_report.py [--ruleset v10_sel]`.
 

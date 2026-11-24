@@ -51,6 +51,7 @@ SW = dict(
     helius_smart=True, helius_smart_daily_credits=12000, smart_compare_every=4,   # v8.1: 15000 -> 12000, paced through the day
     # v15 SHADOW copy-trading signal: every 15 min read each smart wallet's latest txs (public RPC first), log its token buys;
     # 2+ smart wallets buying the same mint within 30 min -> copy_signals row (desk opens a shadow entry ghost, log only)
+    copy_poll_on=False,   # v14: copy_smart2 retired
     copy_poll_s=900, copy_sig_limit=15, copy_window_s=1800, copy_min_wallets=2,
 )
 FACTOR_MAP = {0: 0.0, 1: 45.0, 2: 75.0}   # 3+ -> 100
@@ -91,7 +92,9 @@ STABLES = ("EPjFWdu5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2
 _ata_cache = {}
 def ata(owner, mint, prog):
     k = (owner, mint, prog)
-    if k not in _ata_cache: _ata_cache[k] = pda([b58d(owner), b58d(prog), b58d(mint)], ATA_PROGRAM)
+    if k not in _ata_cache:
+        if len(_ata_cache) > 20_000: _ata_cache.clear()   # v14: bounded (was unbounded for days)
+        _ata_cache[k] = pda([b58d(owner), b58d(prog), b58d(mint)], ATA_PROGRAM)
     return _ata_cache[k]
 def wallet_buy_usd(tx, wallet, mint, sol_usd, token_px=None):
     """-> (USD the wallet spent buying `mint` in one tx, tokens received); (None, 0) if its balance did not grow."""
@@ -431,13 +434,15 @@ class Builder:
     def refresh_winners(self):
         t0 = now()
         cand = {}   # mint -> dict(first_ts, first_mcap, max_mcap, symbol)
-        for mint, sym, met, ts in self.q("SELECT mint,symbol,metrics,ts FROM kills WHERE stage='Scout' AND ts>? ORDER BY id", (now() - 7 * 86400,)):
-            try: d = json.loads(met)
-            except Exception: continue
-            a, mc = d.get("age_h"), d.get("mcap") or 0
-            if a is None or a > SW["winner_max_age_h"]: continue
-            c = cand.setdefault(mint, dict(first_ts=ts, first_mcap=mc, max_mcap=mc, symbol=sym))
-            c["max_mcap"] = max(c["max_mcap"], mc)
+        # v14: the desk keeps first/max mcap per scouted mint in `scout_seen` (Scout kills are deduped and pruned after 48h),
+        # so this no longer json-parses 7 days of `kills` (~1M rows, the main memory/IO cost of this process)
+        try:
+            rows = self.q("SELECT mint,symbol,first_ts,first_mcap,max_mcap FROM scout_seen WHERE last_ts>? AND age_h<=?",
+                          (now() - 7 * 86400, SW["winner_max_age_h"]))
+        except sqlite3.OperationalError:
+            rows = []   # desk not upgraded yet
+        for mint, sym, fts, fmc, mmc in rows:
+            cand[mint] = dict(first_ts=fts, first_mcap=fmc or 0, max_mcap=mmc or 0, symbol=sym)
         for (mint, sym) in self.q("SELECT DISTINCT mint,symbol FROM scores UNION SELECT DISTINCT mint,symbol FROM positions"):
             cand.setdefault(mint, dict(first_ts=None, first_mcap=None, max_mcap=0, symbol=sym))
         from desk import CFG as _DESK_CFG
@@ -461,12 +466,15 @@ class Builder:
         for i in range(0, len(mints), 30):
             for p in self.http.get("https://api.dexscreener.com/tokens/v1/solana/" + ",".join(mints[i:i+30])) or []:
                 if not isinstance(p, dict) or p.get("chainId") != "solana": continue
-                m = p["baseToken"]["address"]
+                m = (p.get("baseToken") or {}).get("address")
+                if m not in cand: continue   # v14: DexScreener also returns pairs whose base is another token (KeyError below)
                 if m in best and ((best[m].get("liquidity") or {}).get("usd") or 0) >= ((p.get("liquidity") or {}).get("usd") or 0): continue
                 best[m] = p
         winners = []
         for m, p in best.items():
-            c = cand[m]; created = p.get("pairCreatedAt")
+            c = cand.get(m)   # v14 fix: was cand[m] -> KeyError for an unexpected base token, refresh_winners never finished
+            if c is None: continue
+            created = p.get("pairCreatedAt")
             if not created: continue
             age_h = (now() * 1000 - created) / 3.6e6
             if age_h > SW["winner_max_age_h"]: continue
@@ -762,8 +770,9 @@ class Builder:
         while not self.stop.is_set():
             try: self.shadow_exit_poll(); self.shadow_reconcile(); self.shadow_partial_tp()
             except Exception as e: self.log("SW_SHADOW_ERROR", error=repr(e), tb=traceback.format_exc()[-600:])
-            try: self.copy_poll()
-            except Exception as e: self.log("SW_COPY_ERROR", error=repr(e), tb=traceback.format_exc()[-600:])
+            if SW.get("copy_poll_on"):   # v14: copy_smart2 retired -> no copy polling (saves RPC calls and memory)
+                try: self.copy_poll()
+                except Exception as e: self.log("SW_COPY_ERROR", error=repr(e), tb=traceback.format_exc()[-600:])
             self.stop.wait(SW["shadow_poll_s"])
 
     def main(self, seed_only=False, max_tokens=None):

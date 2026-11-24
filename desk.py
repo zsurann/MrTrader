@@ -26,7 +26,7 @@ PAUSE_PATH = os.path.join(DATA, "PAUSE_ENTRIES")   # v8.1: if this file exists t
 
 CFG = dict(
     # Scout
-    min_age_h=0.5, max_age_h=6.0, min_mcap=100_000,   # v10: max age 168h -> 6h (ex-shadow new_pair_6h)
+    min_age_h=0.5, max_age_h=24.0, min_mcap=100_000,   # v14 (user-approved 2026-11-24): max age 6h -> 24h (v10 had 168h -> 6h)
     max_mcap=20_000_000,   # v8_loose (user-approved 2026-11-18): age 72h -> 168h, mcap min 300k -> 100k
     # Filter
     min_liq=25_000, min_vol_h1=15_000, max_top10_pct=35.0, max_dev_pct=5.0,   # v8_loose: liq 100k -> 25k, vol1h 50k -> 15k, top10 25 -> 35%, dev 3 -> 5%
@@ -60,6 +60,10 @@ CFG = dict(
     old_mint_cache_s=1800,  # skip re-pricing mints already killed as pair-too-old; TTL so a new pair is still seen
     hard_filter_cache_s=1800,  # skip RugCheck for permanent hard kills (rugged / past rugs / transfer fee / permanent delegate)
     jsonl_rotate_bytes=15 * 1024 * 1024,
+    # v14 DB hygiene (no effect on rules): Scout kills stored once per mint+reason per day (per-cycle counts go to cycles.stats),
+    # kills older than 48h pruned hourly in small batches, the summary report every 20 cycles off the cycle path.
+    scout_kill_dedupe_s=86400, kills_keep_h=48.0, kills_prune_every_s=3600, kills_prune_batch=5000, scout_seen_keep_d=8.0,
+    summary_every_cycles=20, summary_since_h=24,
     # API pacing / caches (no effect on rules). Jupiter lite list TTLs by interval; 5m stays fresh each cycle.
     jup_list_ttl={"5m": 90, "1h": 210, "6h": 540, "24h": 780},  # staggered so list refreshes do not pile up
     jup_search_cache_s=45,   # only long enough to dedupe decimals+analyst in the same cycle
@@ -78,7 +82,7 @@ SHADOW_ENTRY_V5 = dict(organic_50=50.0, churn_50=0.5, churn_max_age_h=24.0, m5_c
 SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03),   # v10: breakeven_8 is live now
                       old_rules_v5=dict(stop=0.06, activate=0.12, dist=0.06, base="fill"))   # v6: what the pre-v6 exit rules would have done
 OLD_RULES_V5 = dict(min_liq=40_000, max_pos_frac=0.08, stop_pct=0.06, smart_zero_counts=True, pass_score=70.0)   # pre-v6 live values, shadow reference only
-RULESET = "v11_clean"   # v11: fresh 1000 $ ledger + network fees in every paper fill   # tag stored on every score row and position (compare rule sets / score buckets later)
+RULESET = "v14_age24"   # v14: fresh 1000 $ ledger, Scout max age 24h (v11_clean: fresh ledger + network fees in every paper fill)   # tag stored on every score row and position (compare rule sets / score buckets later)
 # v8: the v6/v7 LIVE entry rules, kept as a SHADOW reference (log only). Every v8 entry records whether these would have allowed it.
 STRICT_V7 = dict(pass_score=70.0, min_liq=100_000, min_vol_h1=50_000, min_mcap=300_000, max_mcap=20_000_000, max_age_h=72.0,
                  max_h1_change=80.0, max_top10_pct=25.0, max_dev_pct=3.0, max_bundle_pct=10.0)
@@ -506,6 +510,10 @@ class PaperOrder:
     score: float; equity_at_entry: float; created_at: float
     meta: Optional[dict] = None   # v8: entry features (ruleset, score bucket, market + filter values, strict_v7 verdict)
 
+def scout_reason_key(reasons_json):
+    """v14: dedupe key of a Scout kill = its reasons without the numbers (age / mcap values change every cycle)."""
+    return re.sub(r"[0-9][0-9.,]*", "#", reasons_json or "")[:120]
+
 # ---------------------------------------------------------------- Logger (stage 6)
 class Logger:
     def __init__(self):
@@ -535,6 +543,10 @@ class Logger:
         CREATE INDEX IF NOT EXISTS scores_ts ON scores(ts);
         CREATE INDEX IF NOT EXISTS positions_status ON positions(status);
         CREATE INDEX IF NOT EXISTS holders_mint_ts ON holders(mint, ts);
+        CREATE INDEX IF NOT EXISTS kills_stage_ts ON kills(stage, ts);
+        CREATE TABLE IF NOT EXISTS scout_seen(mint TEXT PRIMARY KEY, symbol TEXT, first_ts REAL, first_mcap REAL, max_mcap REAL,
+            last_ts REAL, age_h REAL);   -- v14: compact Scout memory for smartwallets.refresh_winners (was a 7-day scan of kills)
+        CREATE INDEX IF NOT EXISTS scout_seen_last ON scout_seen(last_ts);
         """)
         SWL.ensure_schema(self.db)
         for tbl, col in (("positions", "ruleset TEXT"), ("positions", "entry_meta TEXT"), ("scores", "ruleset TEXT"),   # v8 tags
@@ -553,6 +565,13 @@ class Logger:
             self.db.execute("INSERT OR REPLACE INTO ledger VALUES(?,?)", ("epoch_" + RULESET, now()))
             self.reset = True
         self.cycle = (self.db.execute("SELECT MAX(cycle) FROM cycles").fetchone()[0] or 0)
+        # v14: Scout kill dedupe memory, (mint, reason key) -> last stored ts; primed from the last day so a restart does not re-store
+        self._scout_stored, self._scout_cycle_reasons, self._prune_ts = {}, {}, 0.0
+        try:
+            for m, r, t in self.db.execute("SELECT mint, reasons, MAX(ts) FROM kills WHERE stage='Scout' AND ts>? GROUP BY mint, reasons",
+                                           (now() - CFG["scout_kill_dedupe_s"],)):
+                k = (m, scout_reason_key(r)); self._scout_stored[k] = max(self._scout_stored.get(k, 0), t)
+        except Exception: pass
 
     def event(self, stage, kind, mint=None, symbol=None, **data):
         ts = now()
@@ -576,6 +595,19 @@ class Logger:
         if not rows: return
         ts = now(); ti = iso(ts)
         also_events = stage != "Scout"
+        if stage == "Scout":   # v14: per-cycle counts by reason in cycles.stats; a row in `kills` once per mint+reason per day
+            agg = self._scout_cycle_reasons
+            for m, sym, pair, r, mt in rows:
+                for x in r: k = re.sub(r"[0-9][0-9.,]*", "#", str(x))[:80]; agg[k] = agg.get(k, 0) + 1
+            self._scout_seen(rows, ts)
+            keep, cut = [], ts - CFG["scout_kill_dedupe_s"]
+            for row in rows:
+                k = (row[0], scout_reason_key(json.dumps(row[3])))
+                if self._scout_stored.get(k, 0) < cut: keep.append(row); self._scout_stored[k] = ts
+            if len(self._scout_stored) > 50_000:
+                self._scout_stored = {k: v for k, v in self._scout_stored.items() if v >= cut}
+            rows = keep
+            if not rows: return
         with self.lock:
             self.db.execute("BEGIN")
             try:
@@ -591,6 +623,41 @@ class Logger:
                 self.jsonl.write("".join(json.dumps(dict(ts=ti, cycle=self.cycle, stage=stage, kind="KILL", mint=m, symbol=sym,
                                                          reasons=r, metrics=mt), default=str) + "\n" for m, sym, pair, r, mt in rows))
             self._maybe_rotate_jsonl()
+
+    def _scout_seen(self, rows, ts):
+        """v14: upsert first/max mcap per scouted mint (what smartwallets.refresh_winners needs), without the kills history."""
+        up = []
+        for m, sym, pair, r, mt in rows:
+            mt = mt or {}
+            if mt.get("cached_too_old"): continue   # cached metrics repeat the first reading
+            a, mc = mt.get("age_h"), mt.get("mcap") or 0
+            if a is None or a > 168: continue
+            up.append((m, sym, ts, mc, mc, ts, a))
+        if not up: return
+        with self.lock:
+            self.db.executemany("""INSERT INTO scout_seen(mint,symbol,first_ts,first_mcap,max_mcap,last_ts,age_h) VALUES(?,?,?,?,?,?,?)
+                ON CONFLICT(mint) DO UPDATE SET max_mcap=MAX(max_mcap, excluded.max_mcap), last_ts=excluded.last_ts, age_h=excluded.age_h,
+                symbol=COALESCE(excluded.symbol, symbol)""", up)
+
+    def take_scout_reasons(self):
+        r, self._scout_cycle_reasons = self._scout_cycle_reasons, {}
+        return r
+
+    def prune(self):
+        """v14: delete kills older than kills_keep_h (and old scout_seen rows) in small batches, at most once per kills_prune_every_s."""
+        if now() - self._prune_ts < CFG["kills_prune_every_s"]: return 0
+        self._prune_ts = now(); cut = now() - CFG["kills_keep_h"] * 3600; n = 0
+        while True:
+            with self.lock:
+                d = self.db.execute("DELETE FROM kills WHERE id IN (SELECT id FROM kills WHERE ts<? ORDER BY id LIMIT ?)",
+                                    (cut, CFG["kills_prune_batch"])).rowcount
+            n += d
+            if d < CFG["kills_prune_batch"]: break
+            time.sleep(0.5)   # let the risk/feed threads take the lock between batches
+        with self.lock:
+            self.db.execute("DELETE FROM scout_seen WHERE last_ts<?", (now() - CFG["scout_seen_keep_d"] * 86400,))
+        if n: self.event("Logger", "KILLS_PRUNED", rows=n, keep_h=CFG["kills_keep_h"])
+        return n
 
     def score(self, mint, symbol, score, passed, components):
         ts = now()
@@ -630,15 +697,22 @@ class Logger:
                 except Exception: pass
             self._maybe_rotate_jsonl()
         self.event("Logger", "CYCLE_DONE", **stats)
-        self.write_summary()
+        # v14: the summary scanned the whole kills table every cycle (~100+ s on the 1 GB VM): now every N cycles, last 24h, off-thread
+        if self.cycle % (CFG.get("summary_every_cycles") or 20) == 0 and not getattr(self, "_summary_busy", False):
+            threading.Thread(target=self.write_summary, daemon=True, name="summary").start()
+        try: self.prune()
+        except Exception as e: self.event("Logger", "PRUNE_ERROR", error=repr(e)[:200])
 
     def write_summary(self):
+        self._summary_busy = True
         try:
             import report
-            txt = report.build_report(DB_PATH, since_hours=None)
+            txt = report.build_report(DB_PATH, since_hours=CFG.get("summary_since_h") or 24)
             with open(SUMMARY_PATH, "w") as f: f.write(txt)
         except Exception as e:
             self.event("Logger", "SUMMARY_ERROR", error=repr(e))
+        finally:
+            self._summary_busy = False
 
 # ---------------------------------------------------------------- Scout (stage 1)
 class Scout:
@@ -1090,7 +1164,7 @@ class Executor:
     def _entry_meta(self, ap, liq, ref):
         try:
             c = ap.fp.cand; ck = ap.fp.checks or {}; sr = strict_v7_reasons(c, ck, ap.score)
-            return dict(ruleset=RULESET, live_rules="v13", score=ap.score, score_bucket=score_bucket(ap.score), score_old=ap.components.get("_score_old"),
+            return dict(ruleset=RULESET, live_rules="v14", score=ap.score, score_bucket=score_bucket(ap.score), score_old=ap.components.get("_score_old"),
                         components={k: v for k, v in ap.components.items() if not k.startswith("_")},
                         smart_count=((ap.components.get("_inputs") or {}).get("smart_wallets") or {}).get("count") if isinstance((ap.components.get("_inputs") or {}).get("smart_wallets"), dict) else None,
                         liq_usd=liq, scout_liq_usd=c.liq_usd, mcap=c.mcap, age_h=c.age_h, vol_h1=(c.vol or {}).get("h1"), vol_h24=(c.vol or {}).get("h24"),
@@ -1156,6 +1230,7 @@ class Risk:
         self._plocks, self._plocks_lock = {}, threading.Lock()
         self._last_write, self._src_state, self._pollb, self._post, self._ws_seen = {}, {}, {}, {}, {}
         self.feed = None; self._eliq = {}
+        self.ghosts = None; self._pairs, self._reuse = {}, {}   # v14: ghost tick feed
 
     def open(self, o: PaperOrder):
         assert isinstance(o, PaperOrder) and o.stop_price < o.fill_price
@@ -1343,10 +1418,29 @@ class Risk:
         return self._refs[pid]
     def apply_price(self, pid, px, liq, src, trig=None, force=None):
         """Evaluate the live rules for one OPEN position at price `px` from `src`. Returns True if it closed it.
-        `force` = exit reason that closes at `px` regardless of the stop (v10: smart_exit)."""
+        `force` = exit reason that closes at `px` regardless of the stop (v10: smart_exit).
+        v14: the same tick then goes to the exit-variant ghosts of this pair (shadow_v9.GhostBook.on_tick), after the
+        live decision and outside the position lock; on a live close they may reuse the live fill."""
+        closed = self._apply_live(pid, px, liq, src, trig, force)
+        if closed is None: return False
+        gb = getattr(self, "ghosts", None)
+        if gb:
+            try:
+                pair = self._pairs.get(pid)
+                if pair is None:
+                    with self.log.lock:
+                        r = self.log.db.execute("SELECT pair FROM positions WHERE id=?", (pid,)).fetchone()
+                    pair = self._pairs[pid] = r[0] if r else ""
+                if pair: gb.on_tick(pair, px, liq or self._entry_liq(pid), reuse=self._reuse.pop(pid, None) if closed else None)
+            except Exception as e:
+                self.log.event("Shadow", "ERROR", rule="ghost_tick", error=repr(e)[:200])
+        return closed
+
+    def _apply_live(self, pid, px, liq, src, trig=None, force=None):
+        """-> None if the position is not open (or no price), else True/False = closed now."""
         with self._plock(pid):
             r = self._open_row(pid)
-            if not r or not px: return False
+            if not r or not px: return None
             pid, mint, sym, pair, ep, qty, size, stop, peak, trail, istop = r
             new_peak = max(peak, px)
             new_trail = bool(trail) or new_peak >= (self._ref(pid) or ep) * (1 + CFG["trail_activate"])
@@ -1360,6 +1454,7 @@ class Risk:
                 # live fill first (unchanged model), then shadow can reuse it when the size matches
                 exit_px, fill_src, model_px, q = paper_sell_fill(mint, qty, px, liq, liq_fallback=self._entry_liq(pid))
                 live_reuse = dict(ref=px, qty=qty, exit_px=exit_px, src=fill_src, model_px=model_px, q=q)
+                self._reuse[pid] = live_reuse
                 self.log.event("Risk", "FILL_QUOTE", mint, sym, side="sell", qty=qty, ref_price=px,
                                modeled_slip_pct=round(100 * (1 - model_px / px), 3),
                                quoted_slip_pct=(round(100 * (1 - q["price"] / px), 3) if q else None),
@@ -1867,6 +1962,7 @@ class Desk:
                                         self.log.event, SWL.shadow_event)
         except Exception as e:
             self.ghosts = None; self.log.event("Shadow", "ERROR", rule="ghost_v9_init", error=repr(e)[:200])
+        self.risk.ghosts = self.ghosts   # v14: live ticks -> exit-variant ghosts
     def _mig_ts(self, mint):
         try:
             with self.log.lock:
@@ -1929,9 +2025,9 @@ class Desk:
             gates["strict_v7"] = (score_bucket(ap.score), bool(sr), "v7 strict entry: " + ("; ".join(sr) if sr else "would also pass"))
             try: gates.update(SV9.entry_gates(c, ap, self.liq_hist, self._mig_ts(c.mint)))   # v9 shadow entry gates (log only)
             except Exception as e: self.log.event("Shadow", "ERROR", rule="v9_gates", error=repr(e)[:200])
-            for k in ("old_rules_v5", "new_pair_6h", "buy_pressure", "organic_50", "sell_spike_avoid", "liq_growth"):
-                gates.pop(k, None)   # v10/v13: live now, no longer shadow
-            gates["fomo_score_70"] = (ap.score, ap.score < 70.0, "fomo TikTok bot: every entry shown had Analyst score >= 70")
+            for k in ("old_rules_v5", "buy_pressure", "organic_50", "sell_spike_avoid", "liq_growth"):
+                gates.pop(k, None)   # v10/v13: live now, no longer shadow (v14: new_pair_6h is shadow again, the live age cap is 24h)
+            for k in SV9.RETIRED_V14: gates.pop(k, None)   # v14: churn_50, top1_10, small_trades_200, fomo_score_70 never blocked anything
             gates["liq_100k"] = (c.liq_usd, (c.liq_usd or 0) < 100_000, "pool liquidity >= $100k (deeper pool = smaller gap below the stop)")
             # v12: from shadow_report --features on 210 v8+ trades (no group was significant on its own, both looked best)
             gates["small_cap"] = (dict(mcap=c.mcap, liq=c.liq_usd), (c.mcap or 0) > 240_000 or (c.liq_usd or 0) > 44_000,
@@ -1978,8 +2074,9 @@ class Desk:
         except Exception as e:
             self.log.event("Shadow", "ERROR", error=repr(e))
     def _copy_entries(self):
-        """v15 SHADOW: open a 'copy_smart2' entry ghost for each new copy_signals row (2+ smart wallets bought the mint)."""
-        if not self.ghosts: return
+        """v15 SHADOW: open a 'copy_smart2' entry ghost for each new copy_signals row (2+ smart wallets bought the mint).
+        v14: copy_smart2 retired (236 ghosts, -2.5 $/trade): no new ghosts; smartwallets.py no longer polls copy buys."""
+        if not self.ghosts or "copy_smart2" in SV9.RETIRED_V14: return
         try:
             with self.log.lock:
                 sig = self.log.db.execute("SELECT mint FROM copy_signals WHERE handled=0").fetchall()
@@ -2059,6 +2156,7 @@ class Desk:
         cash, eq = self.exec.equity()
         http1 = HTTP.snapshot()
         http_delta = {k: http1.get(k, 0) - http0.get(k, 0) for k in http1 if http1.get(k, 0) != http0.get(k, 0)}
+        st["scout_kill_reasons"] = self.log.take_scout_reasons()   # v14: Scout kills are deduped in `kills`; per-cycle counts live here
         st.update(filter_pass=fpass, analyst_pass=apass, entries=entries, cash=round(cash, 2), equity=round(eq, 2),
                   secs=round(now() - t0, 1), scout_s=round(scout_s, 1), filter_s=round(fa_s, 1), http=http_delta)
         self.log.cycle_done(st)

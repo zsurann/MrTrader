@@ -96,11 +96,18 @@ class Syncer:
         out = []
         for cyc, t, st in rows:
             reasons, stages = {}, {}
+            stats = json.loads(st)
+            agg = stats.pop("scout_kill_reasons", None)   # v14: Scout kills are deduped in `kills`; the desk counts them per cycle here
             for stage, rs in self.db.execute("SELECT stage,reasons FROM kills WHERE cycle=?", (cyc,)):
+                if agg is not None and stage == "Scout": continue
                 stages[stage] = stages.get(stage, 0) + 1
                 for r in set(category(x) for x in json.loads(rs)):
                     reasons[r] = reasons.get(r, 0) + 1
-            out.append(dict(cycle=cyc, ts=ts(t), stats=json.loads(st), kill_reasons=reasons, kills_by_stage=stages))
+            if agg is not None:
+                stages["Scout"] = int(stats.get("scout_kills") or 0)
+                for x, n in agg.items():   # a kill can carry several reasons; counted per reason, like the row path
+                    c = category(x); reasons[c] = reasons.get(c, 0) + n
+            out.append(dict(cycle=cyc, ts=ts(t), stats=stats, kill_reasons=reasons, kills_by_stage=stages))
         return out, (rows[-1][0] if rows else self.state["cycle"])
 
     def positions(self):
