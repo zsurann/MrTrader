@@ -101,6 +101,8 @@ Il moltiplicatore minimo è 0,25. Il confronto equo è il **rendimento sul capit
 
 Più `risk_size`. Ci sono il retro-test sui trade v8_loose / v10_sel / v11_clean / v14_age24 (da `entry_meta`, dall'ultimo `FILTER_PASS` prima dell'ingresso e dai vecchi eventi ombra `liq_growth` / `holders_300`) e la parte live dalle nuove posizioni. Nel retro-test `rc_score_10` e `liq_peak_drop_10` non sono valutabili (dati non registrati prima della v17), e `holders_2000` solo su 46 trade. Le righe `ingresso` della classifica principale hanno anche `gap_allowed` / `gap_blocked` per ogni filtro, e la classifica esporta la sezione `gap` (dal live) alla dashboard.
 
+**Correzione (stesso giorno).** `GhostBook` teneva il file `events.jsonl` aperto all'avvio. Dopo la rotazione per dimensione quel file era chiuso, e ogni PARTIAL/SHADOW_EXIT dei ghost falliva con "I/O operation on closed file": 3.814 errori dal 18/11, l'ultima volta dopo la rotazione delle 04:36 del 24/11. Ora i ghost scrivono sempre nel file corrente (`JsonlProxy`).
+
 Le sezioni sotto sono uno storico.
 
 ## Regole v10_sel (2026-11-19)

@@ -1947,6 +1947,13 @@ class HeliusFeed:
             time.sleep(backoff if not self.over_budget else 600); backoff = min(backoff * 2, 120)
 
     # ---------------------------------------------------------------- Orchestrator
+class JsonlProxy:
+    """v17 fix: GhostBook kept the events.jsonl handle from startup; after the size rotation that handle is closed and every
+    ghost PARTIAL/SHADOW_EXIT write raised 'I/O operation on closed file' (3,814 errors since 18 Nov). Always use the current one."""
+    def __init__(self, log): self._log = log
+    def write(self, s): return self._log.jsonl.write(s)
+    def flush(self): return self._log.jsonl.flush()
+
 class Desk:
     def __init__(self):
         self.log = Logger(); self.scout = Scout(self.log); self.filter = Filter(self.log)
@@ -1959,7 +1966,7 @@ class Desk:
         self.liq_hist = {}   # v9 shadow: mint -> [(ts, liq)] over the last 2h (Scout candidates)
         self.breadth = self.sol_h24 = None   # v12 shadow: market regime, refreshed every cycle
         try:
-            self.ghosts = SV9.GhostBook(self.log.db, self.log.lock, self.log.jsonl, lambda u: HTTP.get(u, tries=2), paper_sell_fill, CFG,
+            self.ghosts = SV9.GhostBook(self.log.db, self.log.lock, JsonlProxy(self.log), lambda u: HTTP.get(u, tries=2), paper_sell_fill, CFG,
                                         self.log.event, SWL.shadow_event)
         except Exception as e:
             self.ghosts = None; self.log.event("Shadow", "ERROR", rule="ghost_v9_init", error=repr(e)[:200])
