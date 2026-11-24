@@ -8,7 +8,7 @@ Il codice in questo repository sostituisce il vecchio progetto MrTrader. La cron
 
 Sei agenti con handoff rigidi: Scout → Filter → Analyst → Executor → Risk, più Logger.
 
-Regole live attuali: **`v11_clean`** (= regole `v10_sel` approvate 2026-11-19 + costi di rete). Fonte di verità: `CFG` in `desk.py`. Il saldo paper è ripartito da zero con **1.000 $** (i prezzi sono in dollari); i trade precedenti restano nel database ma dashboard e report contano dall'ultima ripartenza.
+Regole live attuali: **`v18_100`** (regole d'ingresso/uscita v14, saldo paper ripartito da **100 $**, costi da soldi veri e taglie 5–15 $; vedi VM.md). Fonte di verità: `CFG` in `desk.py`. I trade precedenti restano nel database ma dashboard, report e Telegram contano dall'ultima ripartenza.
 
 - **Scout**: scopre token da DexScreener, Jupiter e GeckoTerminal. Scarta età fuori da 30 minuti–**6 ore** e market cap fuori da 100k–20M $.
 - **Filter**: prima i controlli di mercato (liquidità ≥ 25k $, volume 1h ≥ 15k $, salita 1h ≤ +150%), poi RugCheck e RPC. Scarta autorità di mint/freeze, LP non bloccata, top 10 holder > 35%, dev > 5%, bundle > 20%, storico rug, transfer fee e permanent delegate. Dati mancanti = scarto.

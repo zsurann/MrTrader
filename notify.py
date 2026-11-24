@@ -28,7 +28,8 @@ STATUS = os.path.join(DATA, "telegram_status.json")
 LOGF = os.path.join(DATA, "telegram.log")
 ROME = ZoneInfo("Europe/Rome")
 CFG = dict(poll_s=15, min_gap_s=2.0, max_per_hour=20, pass_dedupe_h=6, no_cycle_s=300, down_s=60,
-           daily_loss_pct=-3.0, summary_every_h=3, start_equity=1000.0,   # v10 ledger restart
+           daily_loss_pct=-3.0, summary_every_h=3, start_equity=1000.0,   # fallback only; v18 reads ledger 'start_equity'
+           daily_summary_hour=21,   # v18: one results summary per day at 21:00 Europe/Rome (current ledger epoch)
            http_tries=4, http_timeout=15, queue_max=200)
 TEST_MSG = "MemeDesk su VM Google: test Telegram OK"
 
@@ -320,6 +321,38 @@ class Notifier:
         opn = self.q("SELECT qty,last_price,entry_price FROM positions WHERE status='OPEN'")
         return cash + sum(q * (lp or ep) for q, lp, ep in opn), len(opn)
 
+    def start_eq(self):
+        r = self.q("SELECT v FROM ledger WHERE k='start_equity'")
+        return float(r[0][0]) if r and r[0][0] else CFG["start_equity"]
+
+    def daily(self, t, eq, nopen):
+        """v18: once a day after daily_summary_hour (Rome): results of the current ledger epoch, in plain words."""
+        d = datetime.fromtimestamp(t, ROME)
+        if d.hour < CFG["daily_summary_hour"] or self.st.get("daily_sent") == d.strftime("%Y-%m-%d"): return
+        self.st["daily_sent"] = d.strftime("%Y-%m-%d")
+        ep = (self.q("SELECT v FROM ledger WHERE k='epoch_ts'") or [[0]])[0][0] or 0
+        day0 = d.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        start = self.start_eq()
+        rows = self.q("SELECT symbol, pnl_usd, pnl_pct, closed_ts FROM positions WHERE status='CLOSED' AND opened_ts>=? ORDER BY closed_ts", (ep,))
+        def part(rr):
+            n = len(rr); w = sum(1 for r in rr if (r[1] or 0) > 0)
+            return n, w, sum(r[1] or 0 for r in rr), (100 * w / n if n else 0)
+        n, w, pnl, wr = part(rows)
+        tn, tw, tpnl, twr = part([r for r in rows if (r[3] or 0) >= day0])
+        fees = (self.q("SELECT COALESCE(SUM(json_extract(data,'$.net_fee_usd')),0) FROM events WHERE kind='FILL_QUOTE' AND ts>=? "
+                       "AND json_extract(data,'$.side')='buy'", (ep,)) or [[0]])[0][0] or 0
+        best = max(rows, key=lambda r: r[2] or 0) if rows else None
+        worst = min(rows, key=lambda r: r[2] or 0) if rows else None
+        since = datetime.fromtimestamp(ep, ROME).strftime("%d/%m %H:%M") if ep else "?"
+        txt = (f"📅 Risultati MemeDesk di oggi ({d.strftime('%d/%m')}) · paper, come soldi veri\n"
+               f"saldo {usd(eq)} · partito da {usd(start)} il {since} ({pct(100 * (eq / start - 1))})\n"
+               f"oggi: {tn} trade, {tw} vinti ({twr:.0f}%), PnL {usd(tpnl)}\n"
+               f"dall'inizio: {n} trade, {w} vinti ({wr:.0f}%), PnL {usd(pnl)} · posizioni aperte {nopen}\n"
+               f"commissioni di rete stimate {usd(2 * fees)}")
+        if best and worst and n >= 2:
+            txt += f"\nmigliore {best[0]} {pct(best[2] or 0)} · peggiore {worst[0]} {pct(worst[2] or 0)}"
+        self.send(txt)
+
     def health(self):
         t = time.time()
         try: pid = int(open(os.path.join(DATA, "desk.pid")).read().strip())
@@ -351,9 +384,11 @@ class Notifier:
             cl = (self.q("SELECT COUNT(*), COALESCE(SUM(pnl_usd),0) FROM positions WHERE status='CLOSED' AND closed_ts>?", (since,)) or [[0, 0]])[0]
             try: sm = (self.q("SELECT COUNT(*) FROM smart_wallets WHERE is_smart=1") or [[0]])[0][0]
             except Exception: sm = 0
-            self.send(f"📊 Riepilogo MemeDesk ({hm(t)})\nequity {usd(eq)} ({pct(100 * (eq / CFG['start_equity'] - 1))} dall'inizio, {pct(dpct)} oggi)\n"
+            self.send(f"📊 Riepilogo MemeDesk ({hm(t)})\nequity {usd(eq)} ({pct(100 * (eq / self.start_eq() - 1))} dall'inizio, {pct(dpct)} oggi)\n"
                       f"posizioni aperte {nopen} · cicli ultime 3h {ncy} · trade chiusi {cl[0]} ({usd(cl[1])})\nsmart wallet in lista: {sm}")
             self.st["last_summary"] = t
+        try: self.daily(t, eq, nopen)
+        except Exception as e: tlog(f"daily summary error {type(e).__name__}: {repr(e)[:160]}")
 
     def loop(self):
         while True:

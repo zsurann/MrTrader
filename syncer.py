@@ -284,8 +284,13 @@ class Syncer:
         cfg = self.db.execute("SELECT data FROM events WHERE kind='DESK_START' ORDER BY id DESC LIMIT 1").fetchone()
         try: h = json.load(open(os.path.join(DATA, "cycle_health.json")))   # v7: written by the desk after every cycle
         except Exception: h = {}
+        se = self.db.execute("SELECT v FROM ledger WHERE k='start_equity'").fetchone()   # v18: written by the desk at a ledger reset
+        if not se and cfg:
+            try: se = ((json.loads(cfg[0]).get("cfg") or {}).get("start_equity"),)
+            except Exception: se = None
+        start_eq = float(se[0]) if se and se[0] else 1000.0
         return [dict(id=1, heartbeat_at=ts(time.time()), mode="PAPER", desk_pid=pid, desk_alive=alive, cycle=last[0],
-                     last_cycle_at=ts(last[1]), cash=cash, equity=eq, start_equity=1000.0, open_positions=nopen,
+                     last_cycle_at=ts(last[1]), cash=cash, equity=eq, start_equity=start_eq, open_positions=nopen,
                      cfg=(json.loads(cfg[0]).get("cfg") if cfg else None),
                      last_success_at=ts(h.get("last_success_ts") or last[1]), last_success_cycle=h.get("last_success_cycle") or last[0],
                      consecutive_cycle_errors=int(h.get("consecutive_errors") or 0),

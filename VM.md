@@ -49,7 +49,44 @@ VM=user@host KEY=/path/to/ssh_key ./vm_status.sh
 
 In console Oracle non usare Terminate: cancellerebbe la VM. Stop e Reboot fermano il desk.
 
-## Regole live attuali (v14_age24, 2026-11-24)
+## Regole live attuali (v18_100, 2026-11-24)
+
+Solo paper, nessun wallet. Su richiesta dell'utente ("azzeriamo tutti i trade, saldo a 100 come se fossero soldi veri, tanti trade guadagnando il più possibile, gestisci tu"): nuovo `RULESET = "v18_100"`. Al primo avvio con 0 posizioni il saldo paper riparte da **100 $** (`ledger.epoch_v18_100`, `epoch_ts`, `start_equity`). Lo storico resta nel database con il suo `ruleset` (`v8_loose`, `v10_sel`, `v11_clean`, `v14_age24`). Prima del reset è stata fatta una copia del database in `backup_pre_v18/desk.sqlite`. Dashboard, report (`--ruleset v18_100`) e Telegram contano solo dal reset.
+
+**Costi come con soldi veri, per ogni swap (acquisto e vendita):**
+
+- **Rete:** (5.000 lamport di base + 500.000 di priority fee) × prezzo SOL, limitata fra 0,02 e 0,10 $. Con SOL a 69 $ sono circa 0,035 $.
+- **Esecuzione:** 0,3% di peggioramento del prezzo (il prezzo si muove mentre la transazione atterra).
+- **Commissioni DEX/LP e impatto:** sono già dentro la quotazione Jupiter. Senza quotazione si usa il modello: 0,5% + 0,25% + impatto.
+- **Affitto del token account** (~0,002 SOL): non è un costo, si recupera chiudendo l'account dopo la vendita.
+
+Andata e ritorno su 10 $ senza movimento di prezzo: ~1,4%, più ~0,5% di commissioni della pool ≈ 1,9%.
+
+**Dimensioni.** 10% dell'equity per trade (cresce o cala con il saldo), fra 5 $ e 15 $ per ordine, mai oltre lo 0,25% della liquidità della pool. Massimo 8 posizioni aperte. Sotto 5 $ la commissione fissa supera l'1,4% e il trade non parte.
+
+**Regole di ingresso e di uscita: quelle della v14, invariate.** Su 272 trade (v8–v14) nessuna alternativa provata le batte in modo affidabile:
+
+- **Take profit rapido** (+3…+10%, intero o metà): peggiore di 0,6–1,7 punti per trade. Taglia i pochi trade grandi, che pagano le perdite.
+- **Stop più stretti** (−5/−6/−8%): peggiori. Le monete scendono sotto lo stop e poi ripartono.
+- **Stop a tempo** (`time_stop_15m` −1,2 punti, `stale_3h` −0,7) e **uscite a tranche:** peggiori.
+- **Filtri "non inseguire il pump"** (1 h > +15/+30%, 5 min > +8%): i trade bloccati sono andati *meglio* di quelli lasciati passare.
+- **Liquidità minima 40k/75k:** dimezza le perdite oltre lo stop ma non migliora il PnL per trade e dimezza i trade. Resta 25k.
+- **Età massima:** resta 24 h (la fascia 3–12 h è la migliore, oltre 12 h la peggiore, ma la differenza non è significativa).
+
+L'unica regola d'uscita "promettente" dopo la correzione statistica (`trail_4pct`) è già live.
+
+**Esecuzione.** Il poll DexScreener di riserva (per le pool che Helius non segue) passa da 30 a 10 s. Gli stop scattati dal poll finivano in media 5,7% sotto lo stop, quelli scattati da Helius 3,5%. Costo: 6 chiamate DexScreener al minuto, gratis. Helius invariato.
+
+Aspettativa onesta: con queste regole lo storico perde in media ~7% per trade. Con 10% per trade sono circa −0,7% del saldo per trade. Tutte le regole ombra continuano a girare; la classifica dirà se qualcosa batte la live sui nuovi trade.
+
+**Risultati.** La dashboard (Cloudflare Worker, invariato) mostra per l'epoca corrente:
+
+- saldo e curva dell'equity da 100 $;
+- numero di trade, % di vincite, PnL.
+
+`desk_status.start_equity` ora viene dal ledger: prima era fisso a 1.000. Su Telegram (@sasowlbot, dal thread notifiche del syncer, sulla VM, gratis) arriva ogni giorno dopo le 21:00 Europe/Rome un riepilogo: saldo, trade e vincite di oggi e dall'inizio, PnL, commissioni stimate, trade migliore e peggiore. Resta anche il riepilogo ogni 3 h, ora calcolato sul saldo iniziale vero.
+
+## Regole live v14_age24 (2026-11-24)
 
 Solo paper. Come `v10_sel` + filtri v13, con **una sola differenza approvata dall'utente: età massima della coppia nello Scout 6 h → 24 h** (`CFG.max_age_h`). Nuovo `RULESET = "v14_age24"`: al primo avvio con 0 posizioni il saldo paper riparte da **1.000 $** (`ledger.epoch_v14_age24` / `epoch_ts`); le nuove posizioni hanno `entry_meta.live_rules = "v14"`. Le posizioni e i dati ombra vecchi restano nel database con il loro `ruleset` (`v8_loose`, `v10_sel`, `v11_clean`).
 

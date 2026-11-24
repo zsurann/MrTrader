@@ -38,16 +38,23 @@ CFG = dict(
     weights=dict(momentum=0.20, unique_buyers=0.15, buy_sell=0.20, holder_growth=0.15,
                  liq_mcap=0.15, smart_wallets=0.15),  # intended weights (sum 1.0); if smart data unavailable -> renormalised over the other 5
     # Executor
-    start_equity=1_000.0, min_size_usd=10.0, max_pos_frac=0.03,   # v10: paper ledger restarts at 1000 $ (min order 50 -> 10 $)
-    max_open=15, reentry_cooldown_h=1.0,   # v8_loose: size 5% -> 3%, max open 10 -> 15, cooldown 6h -> 1h
+    # v18_100 (user 2026-11-24: "100 as if it were real money, many trades"): 100 $ ledger, 10% of equity per trade (compounds),
+    # each order 5..15 $ (below 5 $ the fixed network fee is > 1.4% round trip), at most 8 open at once
+    start_equity=100.0, min_size_usd=5.0, max_pos_frac=0.10, max_size_usd=15.0,
+    max_open=8, reentry_cooldown_h=1.0,   # v8_loose: cooldown 6h -> 1h
     max_liq_frac=0.0025,   # v6: size also capped at 0.25% of pool liquidity (modeled impact <= 0.5% per side)
     base_slippage=0.005, swap_fee=0.0025,  # + price impact = size / (liq/2)
     # Risk
-    stop_pct=0.10, trail_activate=0.12, trail_dist=0.04, risk_poll_s=30,   # v10: trail 6% -> 4% (ex-shadow trail_4pct)
+    stop_pct=0.10, trail_activate=0.12, trail_dist=0.04, risk_poll_s=10,   # v18: fallback DexScreener poll 30 -> 10 s (poll-triggered stops gapped -5.7% vs -3.5% on Helius)   # v10: trail 6% -> 4% (ex-shadow trail_4pct)
     be_arm=0.08, be_lock=0.01,   # v10: once the peak passes +8% over the fill, stop >= fill +1% (ex-shadow breakeven_8)
     min_score_old=70.0,          # v10: pre-v6 score (smart 0 counts as 0) must also be >= 70 (ex-shadow old_rules_v5 entry)
     crash_quote_max_impact_pct=5.0,
-    net_fee_usd=0.05,   # v11: Solana network cost per swap (base + priority fee, no Jito tip), added to every paper buy and sell
+    net_fee_usd=0.035,  # v18: fallback when the SOL price is unknown (v11: 0.05)
+    # v18 real-money cost model, per swap (buy and sell): network = (5,000 lamports base + 500,000 lamports priority fee) x SOL price,
+    # clamped to 0.02..0.10 $; plus 0.3% execution haircut (price moves while the tx lands, ~1-2 s). DEX/LP fees and price impact
+    # are inside the Jupiter quote (model fallback: base_slippage + swap_fee + impact). Token account rent (~0.002 SOL) is refunded
+    # when the account is closed after the sell, so it is not charged.
+    net_fee_sol=0.000505, net_fee_min_usd=0.02, net_fee_max_usd=0.10, exec_slip=0.003,
     shadow_max_entry_slip_pct=1.5,   # v11 SHADOW gate: skip entries whose fill is > 1.5% above the market price   # v10.1: sells take a Jupiter quote below the 50% band when its route impact is <= this
     smart_exit_live=True,        # v10: close when a tracked smart wallet sells the coin (ex-shadow smart_exit)
       # v6: stop -10% from the MARKET price at entry (was -6% from the fill); trail +12% / 6% also from market prices
@@ -83,7 +90,7 @@ SHADOW_ENTRY_V5 = dict(organic_50=50.0, churn_50=0.5, churn_max_age_h=24.0, m5_c
 SHADOW_EXIT_V5 = dict(time_stop_60m=dict(minutes=60, min_gain=0.03),   # v10: breakeven_8 is live now
                       old_rules_v5=dict(stop=0.06, activate=0.12, dist=0.06, base="fill"))   # v6: what the pre-v6 exit rules would have done
 OLD_RULES_V5 = dict(min_liq=40_000, max_pos_frac=0.08, stop_pct=0.06, smart_zero_counts=True, pass_score=70.0)   # pre-v6 live values, shadow reference only
-RULESET = "v14_age24"   # v14: fresh 1000 $ ledger, Scout max age 24h (v11_clean: fresh ledger + network fees in every paper fill)   # tag stored on every score row and position (compare rule sets / score buckets later)
+RULESET = "v18_100"   # v18: fresh 100 $ ledger, real-money costs and sizing (v14_age24: 1000 $, Scout max age 24h)
 # v8: the v6/v7 LIVE entry rules, kept as a SHADOW reference (log only). Every v8 entry records whether these would have allowed it.
 STRICT_V7 = dict(pass_score=70.0, min_liq=100_000, min_vol_h1=50_000, min_mcap=300_000, max_mcap=20_000_000, max_age_h=72.0,
                  max_h1_change=80.0, max_top10_pct=25.0, max_dev_pct=3.0, max_bundle_pct=10.0)
@@ -481,9 +488,16 @@ def paper_sell_fill(mint, qty, ref, liq, reuse=None, liq_fallback=None):
         # DexScreener -35%, Jupiter -63% at 0.5% impact). Take the worse, real price instead of the model.
         return net_of_fee(q["price"], qty), "jupiter_crash", model_px, q
     return net_of_fee(sane_exit(exit_px, ref), qty), src, model_px, q
+def swap_fee_usd():
+    """v18: network cost of one swap in $ (base + priority fee in SOL x SOL price, clamped); fallback CFG net_fee_usd."""
+    try: su = JUP.sol_usd()
+    except Exception: su = None
+    if not su: return CFG["net_fee_usd"]
+    return min(CFG["net_fee_max_usd"], max(CFG["net_fee_min_usd"], CFG["net_fee_sol"] * su))
 def net_of_fee(px, qty):
-    """v11: Solana network fee per swap folded into the paper price, so live, shadows and ghosts all pay it."""
-    return max(0.0, px - CFG["net_fee_usd"] / qty) if qty else px
+    """v11: Solana network fee per swap folded into the paper price, so live, shadows and ghosts all pay it.
+    v18: also the execution haircut (CFG exec_slip) on the sell price."""
+    return max(0.0, px * (1 - CFG["exec_slip"]) - swap_fee_usd() / qty) if qty else px
 
 
 # ---------------------------------------------------------------- Typed handoff records
@@ -564,6 +578,7 @@ class Logger:
             self.db.execute("UPDATE ledger SET v=? WHERE k='cash'", (CFG["start_equity"],))
             self.db.execute("INSERT OR REPLACE INTO ledger VALUES('epoch_ts',?)", (now(),))
             self.db.execute("INSERT OR REPLACE INTO ledger VALUES(?,?)", ("epoch_" + RULESET, now()))
+            self.db.execute("INSERT OR REPLACE INTO ledger VALUES('start_equity',?)", (CFG["start_equity"],))   # v18: read by syncer/notify
             self.reset = True
         self.cycle = (self.db.execute("SELECT MAX(cycle) FROM cycles").fetchone()[0] or 0)
         # v14: Scout kill dedupe memory, (mint, reason key) -> last stored ts; primed from the last day so a restart does not re-store
@@ -1165,7 +1180,7 @@ class Executor:
     def _entry_meta(self, ap, liq, ref):
         try:
             c = ap.fp.cand; ck = ap.fp.checks or {}; sr = strict_v7_reasons(c, ck, ap.score)
-            return dict(ruleset=RULESET, live_rules="v14", score=ap.score, score_bucket=score_bucket(ap.score), score_old=ap.components.get("_score_old"),
+            return dict(ruleset=RULESET, live_rules="v18", score=ap.score, score_bucket=score_bucket(ap.score), score_old=ap.components.get("_score_old"),
                         components={k: v for k, v in ap.components.items() if not k.startswith("_")},
                         smart_count=((ap.components.get("_inputs") or {}).get("smart_wallets") or {}).get("count") if isinstance((ap.components.get("_inputs") or {}).get("smart_wallets"), dict) else None,
                         liq_usd=liq, scout_liq_usd=c.liq_usd, mcap=c.mcap, age_h=c.age_h, vol_h1=(c.vol or {}).get("h1"), vol_h24=(c.vol or {}).get("h24"),
@@ -1198,7 +1213,7 @@ class Executor:
             if not ref:
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["data unavailable: fresh price at entry"], {}); return None
             cash, eq = self.equity()
-            size = min(CFG["max_pos_frac"] * eq, cash, CFG["max_liq_frac"] * liq)   # v6: also <= 0.25% of pool liquidity
+            size = min(CFG["max_pos_frac"] * eq, CFG["max_size_usd"], cash, CFG["max_liq_frac"] * liq)   # v6: also <= 0.25% of pool liquidity; v18: <= 15 $
             if size < CFG["min_size_usd"]:
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["insufficient paper cash"], dict(cash=cash)); return None
             slip, _ = model_slip(size, liq)   # v8.2: capped model (liq here is the fresh DexScreener value, size <= 0.25% of it)
@@ -1207,11 +1222,13 @@ class Executor:
             if q and 0.9 <= q["price"] / ref <= 1.15:   # sanity band vs fresh DexScreener price; else keep model
                 fill, fill_src = max(q["price"], ref * (1 + 0.0005)), "jupiter"
                 slip = fill / ref - 1
-            fill *= 1 + CFG["net_fee_usd"] / size   # v11: network fee on the buy
+            fee = swap_fee_usd()
+            fill *= (1 + CFG["exec_slip"]) * (1 + fee / size)   # v11: network fee on the buy; v18: + execution haircut
             self.log.event("Executor", "FILL_QUOTE", c.mint, c.symbol, side="buy", size_usd=round(size, 2), ref_price=ref,
                            modeled_slip_pct=round(100 * (model_fill / ref - 1), 3),
                            quoted_slip_pct=(round(100 * (q["price"] / ref - 1), 3) if q else None),
-                           jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src)
+                           jup_impact_pct=(q or {}).get("impact_pct"), route=(q or {}).get("route"), used=fill_src,
+                           net_fee_usd=round(fee, 4), exec_slip_pct=round(100 * CFG["exec_slip"], 2))
             if not (fill > 0 and math.isfinite(fill)) or fill > ref * (1 + MAX_MODEL_SLIP):   # v8.2 entry fill guard
                 self.log.kill("Executor", c.mint, c.symbol, c.pair_address, ["insane entry fill (guard)"], dict(ref=ref, fill=fill)); return None
             order = PaperOrder(mint=c.mint, symbol=c.symbol, pair_address=c.pair_address, ref_price=ref, fill_price=fill,
