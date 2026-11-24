@@ -62,6 +62,45 @@ Solo paper. Come `v10_sel` + filtri v13, con **una sola differenza approvata dal
 - **Ritirate** (niente nuovi ghost/eventi, storico conservato): `ladder_2x4x_trail18`, `profit_lock`, `tp2x_half_trail25`, `wide_stop50_trail20`, `limit_entry_2pct`, `trail_early_6_3`, `copy_smart2`, `score_45_55`, `migration_dip`, `dip_after_pump`, e i filtri che non bloccavano niente `churn_50`, `top1_10`, `small_trades_200`, `fomo_score_70`. `new_pair_6h` torna filtro ombra (età ≤ 6 h), dato che la live ora arriva a 24 h.
 - **Nuovi ingressi ombra "pre-pump"** (solo log, uscite live, prezzi dal poll 30 s): su monete che hanno passato tutti i controlli del Filter, con 1 h tra −5% e +5% e 5 min tra −3% e +3%. `prepump_vol`: volume 5 min ≥ 2× il ritmo dell'ultima ora, almeno 5 acquisti e acquisti ≥ vendite (5 min). `prepump_buys`: ≥ 60% acquisti a 5 min (almeno 5) e acquisti/vendite ≥ 1,2 a 1 h. `prepump_both`: entrambi. Fill modello, come gli altri ingressi ombra. Massimo 60 ghost d'ingresso aperti.
 
+### v17 (2026-11-24): ombra contro le perdite oltre lo stop (solo log)
+
+Spunto: il trade 281 `Unemployed` (v14) ha toccato lo stop −10% ma è uscito a −21,7% dopo 39 s, perché il prezzo è saltato oltre lo stop. **Le regole live non cambiano** e `RULESET` resta `v14_age24` (nessun reset del saldo). Codice in `gap_rules.py` (funzioni pure), registrato da `Desk.shadow_entry_gate` come eventi `ENTRY_GATE` (stesse righe della classifica). Le caratteristiche di ogni nuova posizione vanno in `entry_meta.gap` e il moltiplicatore in `entry_meta.risk_mult`.
+
+"Perdita oltre lo stop" (gap loss) = trade chiuso con PnL realizzato peggiore di **−12%**. Attenzione: con stop −10% dal prezzo di mercato, slippage d'ingresso (~1,7% in media) e commissioni, già lo stop "normale" chiude spesso sotto −12%. Sui 271 trade storici la quota è del 49%, e la media degli stop-loss è −16,7%.
+
+| Regola | Lascia passare solo se |
+|---|---|
+| `liq_40k` / `liq_75k` | liquidità della pool all'ingresso ≥ 40k / 75k $ (dato DexScreener fresco dell'ingresso) |
+| `h1_pump_15` / `h1_pump_30` | variazione 1 h ≤ +15% / +30% |
+| `m5_pump_8` | variazione 5 min ≤ +8%. L'ombra `m5_chase_10` (+10%) resta: nello storico 83 trade sono bloccati da entrambe e solo 8 solo da `m5_pump_8` |
+| `lp_burn_100` | LP della coppia principale ≥ 99,5% bruciata o bloccata e ≥ 95% di tutta la liquidità (live: 90% / 80%) |
+| `top10_max20` | top-10 holder (escluse pool e burn) < 20% (live ≤ 35%; l'ombra `top10_15` resta) |
+| `dev_zero` | il creatore detiene ≤ 0,1% (live ≤ 5%) |
+| `liq_drop_2` | liquidità non scesa più del 2% rispetto al campione più vecchio di almeno 20 min (live 5%) |
+| `liq_peak_drop_10` | liquidità non più del 10% sotto il massimo delle ultime 2 h (nessuna grossa rimozione recente) |
+| `rc_score_10` | punteggio di rischio normalizzato di RugCheck ≤ 10 (1 = nessun rischio). Dato già nella risposta RugCheck del Filter: nessuna chiamata in più |
+| `holders_2000` | almeno 2.000 holder (RugCheck `totalHolders`) |
+| `creator_no_dead` | il creatore non ha token precedenti ora sotto 10k $ di mcap (la live blocca da 2 in su) |
+| `creator_first` | il creatore non ha nessun token precedente |
+| `anti_rug_strict` | tutte insieme: `lp_burn_100`, `top10_max20`, `dev_zero`, `liq_drop_2`, `creator_no_dead` |
+
+**`risk_size` (dimensione scalata sul rischio, evento `SIZE`).** È un'ipotesi: la dimensione live viene moltiplicata per dei fattori e il PnL ipotetico è il PnL live per il moltiplicatore. I fattori:
+
+- liquidità: sotto 40k → ×0,5; sotto 75k → ×0,75;
+- pump 1 h: sopra +30% → ×0,5; sopra +15% → ×0,75;
+- volatilità (|variazione 5 min|): sopra 8% → ×0,5; sopra 4% → ×0,75.
+
+Il moltiplicatore minimo è 0,25. Il confronto equo è il **rendimento sul capitale investito** (PnL / capitale), non il totale in $: un desk in perdita perde meno $ con qualunque riduzione.
+
+**Report.** `sudo python3 shadow_report.py --gap [--json file]` mostra, per ogni regola:
+
+- trade valutabili e non valutabili (`nd`);
+- quota di gap loss fra i trade lasciati passare e quelli bloccati;
+- % media per trade dei due gruppi;
+- differenza "lasciati passare − tutti" con IC 90%, il p, il q di Benjamini-Hochberg fra le regole gap e il verdetto.
+
+Più `risk_size`. Ci sono il retro-test sui trade v8_loose / v10_sel / v11_clean / v14_age24 (da `entry_meta`, dall'ultimo `FILTER_PASS` prima dell'ingresso e dai vecchi eventi ombra `liq_growth` / `holders_300`) e la parte live dalle nuove posizioni. Nel retro-test `rc_score_10` e `liq_peak_drop_10` non sono valutabili (dati non registrati prima della v17), e `holders_2000` solo su 46 trade. Le righe `ingresso` della classifica principale hanno anche `gap_allowed` / `gap_blocked` per ogni filtro, e la classifica esporta la sezione `gap` (dal live) alla dashboard.
+
 Le sezioni sotto sono uno storico.
 
 ## Regole v10_sel (2026-11-19)

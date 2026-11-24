@@ -15,6 +15,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 import smartwallets as SWL   # free on-chain smart-wallet list + shadow rules (log-only)
 import shadow_v9 as SV9      # v9 SHADOW-only rules (ghost tracker + entry gates), log only
+import gap_rules as GR       # v17 SHADOW-only rules against gap-through-stop losses, log only
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("MEMEDESK_DATA", BASE)   # override for isolated test runs
@@ -2055,6 +2056,21 @@ class Desk:
                 gates["entry_slip_15"] = (order.slippage_pct, order.slippage_pct > lim, f"skip if the fill is > {lim}% above the market price")
                 # v16: the only positive group in the 231-trade analysis (small, fast pools), unstable between halves
                 gates["slip_gt3"] = (order.slippage_pct, order.slippage_pct <= 3.0, "only entries whose fill is > 3% above the market price")
+            try:   # v17 SHADOW (log only): gap-through-stop rules + risk-scaled size (gap_rules.py); the live rules do not read them
+                eliq = ((order.meta or {}).get("liq_usd") if order else None) or c.liq_usd
+                gf = GR.features_live(c, ap.fp, eliq, self.liq_hist, now())
+                gates.update(GR.gates(gf))
+                if order and pid:
+                    mult, fac = GR.risk_mult(gf)
+                    with self.log.lock:
+                        r = self.log.db.execute("SELECT entry_meta FROM positions WHERE id=?", (pid,)).fetchone()
+                        m = json.loads(r[0]) if r and r[0] else {}
+                        m["gap"] = gf; m["risk_mult"] = mult
+                        self.log.db.execute("UPDATE positions SET entry_meta=? WHERE id=?", (json.dumps(m), pid))
+                    SWL.shadow_event(self.log.db, self.log.lock, self.log.jsonl, "risk_size", "SIZE", c.mint, c.symbol, pid,
+                                     cycle=self.log.cycle, mult=mult, factors=fac, size_usd=order.size_usd,
+                                     hyp_size_usd=round(order.size_usd * mult, 2), features=gf)
+            except Exception as e: self.log.event("Shadow", "ERROR", rule="gap_rules", error=repr(e)[:200])
             if order and self.ghosts and pid:
                 try: self.ghosts.on_live_entry(pid, order, ap)   # v9 ghost exit variants for this live entry
                 except Exception as e: self.log.event("Shadow", "ERROR", rule="ghost_v9_entry", error=repr(e)[:200])

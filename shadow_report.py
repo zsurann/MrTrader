@@ -10,6 +10,7 @@ delta_usd > 0 means the shadow rule beats the live rules on the same trades. Man
 `board()` is also used by syncer.py for the dashboard.
 """
 import argparse, json, os, random, sqlite3
+import gap_rules as GR
 from collections import defaultdict
 
 # v10: these used to be shadow rules and are live now (their old rows are history, not candidates)
@@ -93,7 +94,8 @@ def board(db, ruleset=None, include_retired=False):
         add("ingresso", rule, len(items), sum(pos[p][0] for p in blk), sum(pos[p][0] for p, b in blk.items() if not b), sum(blk.values()),
             n_rule=len(allowed), live_pct=_mean([x for x, _ in items]), rule_pct=_mean(allowed),
             boot=_boot(diff, items) if allowed and blocked_v else None, own=own,
-            extra=dict(blocked_pct=None if not blocked_v else round(_mean(blocked_v), 2)))
+            extra=dict(blocked_pct=None if not blocked_v else round(_mean(blocked_v), 2),
+                       gap_allowed=_gap_rate(allowed), gap_blocked=_gap_rate(blocked_v)))   # v17: share of losses worse than -12%
     # ---- ghosts
     try:
         g = q("SELECT rule, kind, position_id, hyp_pnl_usd, hyp_pnl_pct, opened_ts FROM shadow_ghosts WHERE status='CLOSED' AND hyp_pnl_usd IS NOT NULL")
@@ -147,7 +149,106 @@ def board(db, ruleset=None, include_retired=False):
              f"verdicts need >= {MIN_N} trades on the rule side. Entry ghosts are priced by the 30 s poll: compare them with "
              f"the ghost_live_poll30 drift, not with live.")
     return dict(positions=len(pos), live_pnl=round(sum(v[0] for v in pos.values()), 2), rows=rows, stats=stats(db, where, args),
-                drift=drift, notes=notes, metric="pct_per_trade")
+                drift=drift, notes=notes, metric="pct_per_trade", gap=gap_live(db, pos))
+
+# ---------------------------------------------------------------- v17: gap-through-stop shadow rules (gap_rules.py)
+def _gap_rate(pcts):
+    """% of trades whose realized PnL is worse than GR.GAP_LOSS_PCT (-12%)."""
+    return None if not pcts else round(100 * sum(1 for x in pcts if x < GR.GAP_LOSS_PCT) / len(pcts), 1)
+
+def gap_eval(trades):
+    """trades: list of dict(id, ruleset, pnl_pct, pnl_usd, size_usd, f) -> dict(rows, size, base).
+    rows: per gap rule, allowed vs blocked: n, gap-loss rate, mean % per trade; diff = allowed mean - all mean (bootstrap 90% CI,
+    one-sided p, Benjamini-Hochberg across the gap rules). Undecidable trades (data missing) are left out of that rule.
+    size: risk-scaled sizing (GR.risk_mult) vs live: return on deployed capital and $ PnL with the live size x multiplier."""
+    rows = []
+    allp = [t["pnl_pct"] for t in trades]
+    for rule in GR.RULES:
+        items = []
+        for t in trades:
+            b = GR.gates(t["f"])[rule][1]
+            if b is not None: items.append((t["pnl_pct"], b))
+        al = [x for x, b in items if not b]; bl = [x for x, b in items if b]
+        def diff(s):
+            a = [x for x, b in s if not b]
+            return None if not a else _mean(a) - _mean([x for x, _ in s])
+        lo, hi, p = _ci_p(_boot(diff, items)) if al and bl else (None, None, None)
+        rows.append(dict(rule=rule, text=GR.RULES[rule], n=len(items), undecidable=len(trades) - len(items), n_allowed=len(al), n_blocked=len(bl),
+                         gap_all=_gap_rate([x for x, _ in items]), gap_allowed=_gap_rate(al), gap_blocked=_gap_rate(bl),
+                         mean_all=None if not items else round(_mean([x for x, _ in items]), 2),
+                         mean_allowed=None if not al else round(_mean(al), 2), mean_blocked=None if not bl else round(_mean(bl), 2),
+                         diff_pct=None if not (al and items) else round(_mean(al) - _mean([x for x, _ in items]), 2),
+                         diff_ci=[lo, hi] if lo is not None else None, p=p))
+    ps = sorted((x["p"], i) for i, x in enumerate(rows) if x["p"] is not None); m = len(ps); prev = 1.0; qv = {}
+    for rank in range(m, 0, -1):
+        p, i = ps[rank - 1]; prev = min(prev, p * m / rank); qv[i] = round(prev, 4)
+    for i, x in enumerate(rows):
+        x["q_bh"] = qv.get(i)
+        if x["p"] is None or x["n_allowed"] < MIN_N or x["n_blocked"] < 5: x["verdict"] = "too few"
+        elif x["q_bh"] < FDR_Q and x["diff_pct"] > 0: x["verdict"] = "promising"
+        else: x["verdict"] = "no evidence"
+    sz = [(t["pnl_pct"], t["size_usd"] or 0.0, t["pnl_usd"], GR.risk_mult(t["f"])[0]) for t in trades]
+    size = None
+    if sz:
+        roc = lambda s, k: (sum(p * sz_ * (mu if k else 1) for p, sz_, _, mu in s) / sum(sz_ * (mu if k else 1) for p, sz_, _, mu in s)
+                            if sum(sz_ for _, sz_, _, _ in s) else None)
+        dv = lambda s: (None if roc(s, 0) is None else roc(s, 1) - roc(s, 0))
+        lo, hi, p = _ci_p(_boot(dv, sz))
+        gl = [x for x in sz if x[0] < GR.GAP_LOSS_PCT]
+        size = dict(n=len(sz), mean_mult=round(_mean([x[3] for x in sz]), 3), share_scaled=round(100 * sum(1 for x in sz if x[3] < 1) / len(sz), 1),
+                    roc_live_pct=round(roc(sz, 0), 2) if roc(sz, 0) is not None else None,
+                    roc_scaled_pct=round(roc(sz, 1), 2) if roc(sz, 1) is not None else None,
+                    diff_ci=[lo, hi] if lo is not None else None, p=p,
+                    pnl_live_usd=round(sum(x[2] for x in sz), 2), pnl_scaled_usd=round(sum(x[2] * x[3] for x in sz), 2),
+                    gap_loss_live_usd=round(sum(x[2] for x in gl), 2), gap_loss_scaled_usd=round(sum(x[2] * x[3] for x in gl), 2),
+                    mean_mult_gap=None if not gl else round(_mean([x[3] for x in gl]), 3),
+                    mean_mult_other=None if len(gl) == len(sz) else round(_mean([x[3] for x in sz if x[0] >= GR.GAP_LOSS_PCT]), 3),
+                    note="scaled $ = live $ x multiplier (smaller orders would also have had a little less slippage; ignored)")
+    return dict(rows=rows, size=size, base=dict(n=len(trades), gap_rate=_gap_rate(allp), mean_pct=None if not allp else round(_mean(allp), 2)),
+                gap_loss_pct=GR.GAP_LOSS_PCT)
+
+def gap_live(db, pos):
+    """Gap board from what the desk logged live (v17+ entries carry entry_meta['gap'])."""
+    try:
+        tr = []
+        for pid, meta in db.execute("SELECT id, entry_meta FROM positions WHERE entry_meta LIKE '%\"gap\":%'"):
+            if pid not in pos: continue
+            f = (json.loads(meta) or {}).get("gap")
+            if isinstance(f, dict): tr.append(dict(id=pid, pnl_pct=pos[pid][1], pnl_usd=pos[pid][0], size_usd=pos[pid][2], f=f))
+        return gap_eval(tr) if tr else None
+    except Exception as e:
+        return dict(error=repr(e)[:200])
+
+def gap_backfill(db, rulesets=("v8_loose", "v10_sel", "v11_clean", "v14_age24")):
+    """Gap rules evaluated on old trades (features rebuilt by GR.backfill), all eras together and per era."""
+    tr = GR.backfill(db, rulesets)
+    out = dict(all=gap_eval(tr), eras={})
+    for rs in sorted({t["ruleset"] for t in tr}):
+        out["eras"][rs] = gap_eval([t for t in tr if t["ruleset"] == rs])
+    tr_ids = {t["id"] for t in tr}
+    # overlap with the existing shadow gate m5_chase_10 (+10%): trades m5_pump_8 blocks that it would not
+    out["m5_overlap"] = dict(both=sum(1 for t in tr if (t["f"].get("m5") or -1e9) > 10.0),
+                             only_m5_pump_8=sum(1 for t in tr if 8.0 < (t["f"].get("m5") or -1e9) <= 10.0))
+    out["trades"] = len(tr_ids)
+    return out
+
+def print_gap(g, title):
+    b = g["base"]
+    print(f"{title}: trade {b['n']}, gap-loss (< {g['gap_loss_pct']:.0f}%) {b['gap_rate']}%, media {b['mean_pct']}% per trade")
+    print(f"{'regola':18} {'n':>4} {'nd':>4} {'pass':>5} {'blocc':>5} {'gap% pass':>9} {'gap% blocc':>10} {'%/trade pass':>12} {'%/trade blocc':>13} "
+          f"{'diff pp':>8} {'IC90':>15} {'q':>6}  verdetto")
+    for x in g["rows"]:
+        f = lambda v, w: (f"{v:+{w}.2f}" if v is not None else " " * (w - 1) + "—")
+        r = lambda v, w: (f"{v:{w}.1f}" if v is not None else " " * (w - 1) + "—")
+        ci = f"[{x['diff_ci'][0]:+.1f}, {x['diff_ci'][1]:+.1f}]" if x["diff_ci"] else ""
+        print(f"{x['rule']:18} {x['n']:4d} {x['undecidable']:4d} {x['n_allowed']:5d} {x['n_blocked']:5d} {r(x['gap_allowed'], 9)} {r(x['gap_blocked'], 10)} "
+              f"{f(x['mean_allowed'], 12)} {f(x['mean_blocked'], 13)} {f(x['diff_pct'], 8)} {ci:>15} {x['q_bh'] if x['q_bh'] is not None else '—':>6}  {x['verdict']}")
+    s = g["size"]
+    if s:
+        ci = f"[{s['diff_ci'][0]:+.2f}, {s['diff_ci'][1]:+.2f}]" if s["diff_ci"] else "—"
+        print(f"risk_size: n={s['n']}, moltiplicatore medio {s['mean_mult']} ({s['share_scaled']}% dei trade ridotti; gap-loss {s['mean_mult_gap']} vs altri {s['mean_mult_other']}); "
+              f"rendimento sul capitale live {s['roc_live_pct']:+.2f}% vs scalato {s['roc_scaled_pct']:+.2f}% (diff IC90 {ci}, p {s['p']}); "
+              f"PnL live {s['pnl_live_usd']:+.2f} $ vs scalato {s['pnl_scaled_usd']:+.2f} $; perdite gap {s['gap_loss_live_usd']:+.2f} $ vs {s['gap_loss_scaled_usd']:+.2f} $")
 
 def ci90(per, n=400):
     """90% bootstrap interval of the TOTAL (resampled trades). Used by --features."""
@@ -243,7 +344,20 @@ if __name__ == "__main__":
     ap.add_argument("--all", action="store_true", help="also list the rules that are live now (retired from shadow)")
     ap.add_argument("--features", action="store_true", help="PnL per tertile of each entry feature instead of the shadow board")
     ap.add_argument("--mine", action="store_true", help="search 1-2 condition filters profitable in both the old and the recent trades")
+    ap.add_argument("--gap", action="store_true", help="v17 gap-through-stop shadow rules: backfill on v8/v10/v11/v14 trades + live")
+    ap.add_argument("--json", help="with --gap: also write the result as JSON to this file")
     a = ap.parse_args()
+    if a.gap:
+        dbc = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True)
+        g = gap_backfill(dbc)
+        print_gap(g["all"], "BACKFILL tutte le ere")
+        for rs, ge in g["eras"].items(): print(); print_gap(ge, f"BACKFILL {rs}")
+        print(f"\nm5_pump_8 vs m5_chase_10: bloccati da entrambe {g['m5_overlap']['both']}, solo da m5_pump_8 (+8..+10%) {g['m5_overlap']['only_m5_pump_8']}")
+        b = board(dbc)
+        if b.get("gap") and b["gap"].get("rows"): print(); print_gap(b["gap"], "LIVE (v17+, loggato all'ingresso)")
+        if a.json:
+            with open(a.json, "w") as fh: json.dump(dict(backfill=g, live=b.get("gap")), fh, indent=1)
+        raise SystemExit
     if a.mine:
         r = mine(sqlite3.connect(f"file:{a.db}?mode=ro", uri=True))
         print(f"trade {r['trades']} (vecchi {r['train']} / recenti {r['test']}), combinazioni provate {r['tested']}, "
